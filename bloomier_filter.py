@@ -127,13 +127,14 @@ class BloomierFilter:
         return True
                 
     def get_neighbors(self, node):
-        neighbors = []
+        neighbors = [child for child in self.child_iter(node)]
+        return np.array(neighbors)
+
+    def child_iter(self, node):
         for i in range(0, self.neighb_count):
             hashes = self.get_hashes(self.key_hasher(node, i))
             cells = np.array([self.table[h] for h in hashes])
-            neighbors.append(np.bitwise_xor.reduce(cells))
-        return np.array(neighbors)
-
+            yield np.bitwise_xor.reduce(cells)
 
 
 # network = {
