@@ -4,27 +4,30 @@ from bloomier_filter import BloomierFilter
 
 @dataclass
 class WeightMatrix:
-    """
-    u: np.ndarray
-    v: np.ndarray
-    check: bool
-    """
-
     _NO_STORE = object()
 
-    def __init__(self, u: np.ndarray, v: np.ndarray, network: dict, check: bool = True):
-
-        children_counts = {len(v) for v in network.values()}
-
+    def __init__(self, network: dict, rank: int = None, check_indexing: bool = True, weight_initializer:callable = np.random.normal):
+        children_counts = {len(c) for c in network.values()}
+        if len(children_counts) == 0:
+            raise TypeError("?????")
         if not len(children_counts) == 1:
             raise TypeError("Inconsistent number of children for each neuron. Check your network dictionary.")
 
+        n = len(network.keys())
+
+        if rank is None:
+            rank = np.ceil(0.05 * n).astype(np.int64)
+
+        k = rank
+        U,V = weight_initializer(size=(2, n, k))
+
         self.bloomier = BloomierFilter()
         self.bloomier.construct(*children_counts, network)
-        self.u = u
-        self.v = v
-        self.check = check
-
+        self.network = network
+        self.U = U
+        self.V = V
+        self.check = check_indexing
+        self.size = n
 
     @dataclass
     class _At:
@@ -93,7 +96,7 @@ class WeightMatrix:
         return i,j
     def __getitem__(self, key):
         i,j = self.__checkkey__(key)
-        return np.einsum('...k,...k->...', self.u[i], self.v[j])
+        return np.einsum('...k,...k->...', self.U[i], self.V[j])
 
     def __setitem__(*args):
         raise NotImplementedError("Setting values directly is unsupported.")
@@ -111,12 +114,12 @@ class WeightMatrix:
         # row/col anchors (only touched rows/cols, not full copies)
         Ui_unique, inv_i = np.unique(If, return_inverse=True)
         Vj_unique, inv_j = np.unique(Jf, return_inverse=True)
-        U_anchor = self.u[Ui_unique].copy()
-        V_anchor = self.v[Vj_unique].copy()
+        U_anchor = self.U[Ui_unique].copy()
+        V_anchor = self.V[Vj_unique].copy()
 
         for _ in range(iters):
-            ui = self.u[If]                      # (P,k)
-            vj = self.v[Jf]                      # (P,k)
+            ui = self.U[If]                      # (P,k)
+            vj = self.V[Jf]                      # (P,k)
 
             den_v = np.sum(vj**2, axis=1, keepdims=True) + l2_reg
             den_u = np.sum(ui**2, axis=1, keepdims=True) + l2_reg
@@ -125,17 +128,17 @@ class WeightMatrix:
             dv = lr * (Df[:, None] * (ui / den_u) - l2_reg * (vj - V_anchor[inv_j]))
 
             # scatter-add back to rows/cols; handles repeats in I/J
-            np.add.at(self.u, If, du)
-            np.add.at(self.v, Jf, dv)
+            np.add.at(self.U, If, du)
+            np.add.at(self.V, Jf, dv)
 
     def save(self, filepath):
-        np.savez_compressed(filepath, u=self.u, v=self.v)
+        np.savez_compressed(filepath, u=self.U, v=self.V)
 
     def load_from_disk(self, filepath):
         try:
             data = np.load(filepath)
-            self.u = data['u']
-            self.v = data['v']
+            self.U = data['u']
+            self.V = data['v']
         except:
             raise Exception(f"Couldn't open file: {filepath}")
 

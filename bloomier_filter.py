@@ -1,131 +1,132 @@
 import numpy as np
 from dataclasses import dataclass
 
+MASK64: int = (1 << 64) - 1
+
 @dataclass
 class BloomierFilter:
     table: np.ndarray = None
     key_amount: int = -1
     neighb_count: int = -1
+    salt: int = 0x243F6A8885A308D3  # or random 64-bit
 
     def key_hasher(self, key, n):
         return ((key + n) * (key + n + 1)) // 2 + n
-
-    def hash1(self, x):
-        return (x * 2654435761) % self.key_amount
-
-    def hash2(self, x):
-        return (x * 1597334677) % self.key_amount
-
-    def hash3(self, x):
-        return (x * 3266489917) % self.key_amount
+    def _splitmix64(self, x):
+        # add once in your class
+        x = (x + 0x9E3779B97F4A7C15) & MASK64
+        z = x
+        z ^= (z >> 30)
+        z = (z * 0xBF58476D1CE4E5B9) & MASK64
+        z ^= (z >> 27)
+        z = (z * 0x94D049BB133111EB) & MASK64
+        z ^= (z >> 31)
+        return z & MASK64
 
     def get_hashes(self, key):
-        return set([self.hash1(key), self.hash2(key), self.hash3(key)])
+        # robust, independent-ish indices; dedup to avoid double-decrement bugs
+        x = (key ^ self.salt) & MASK64
+        h1 = self._splitmix64(x) % self.key_amount
+        h2 = self._splitmix64(x + 1) % self.key_amount
+        h3 = self._splitmix64(x + 0x9D) % self.key_amount
+        return h1, h2, h3
 
+    # Replace find_peeling_order to RECORD the witness cell for each key and
+    # to return the order already reversed for assignment.
     def find_peeling_order(self, keys):
-        order = []
-        remaining_keys = set(keys)
-        cell_counts = [0] * self.key_amount  # how many unprocessed keys touch each cell
-    
-        # Initialize counts
-        for key in keys:
-            for cell in self.get_hashes(key):
-                cell_counts[cell] += 1
-    
-        # Peel iteratively
-        while remaining_keys:
-            # Find a key with at least one cell that no other remaining key touches
-            peelable_key = None
-            unique_cell = None
+        key_cells = {}
+        max_cell = -1
+        for k in keys:
+            cells = tuple(sorted(set(self.get_hashes(k))))
+            key_cells[k] = cells
+            if cells:
+                max_cell = max(max_cell, max(cells))
+        if max_cell < 0:
+            return [], {}
 
-            for key in remaining_keys:
-                cells = self.get_hashes(key)
-                for cell in cells:
-                    if cell_counts[cell] == 1:  # only this key touches it
-                        peelable_key = key
-                        unique_cell = cell
-                        break
-                if peelable_key:
-                    break
-                
-            if not peelable_key:
-                return None  # construction failed - no valid peeling order
+        m = max_cell + 1
+        cell_to_keys = [set() for _ in range(m)]
+        for k, cells in key_cells.items():
+            for c in cells:
+                cell_to_keys[c].add(k)
 
-            #order.append((peelable_key, unique_cell))
-            order.append(peelable_key)
-            remaining_keys.remove(peelable_key)
+        from collections import deque
+        deg = [len(s) for s in cell_to_keys]
+        q = deque([c for c, d in enumerate(deg) if d == 1])
 
-            # Decrease counts for this key's cells
-            for cell in self.get_hashes(peelable_key):
-                cell_counts[cell] -= 1
-    
-        return list(reversed(order))
+        remaining = set(keys)
+        peel_order = []
+        witness = {}
 
+        while q and remaining:
+            c = q.popleft()
+            if deg[c] != 1:
+                continue
+            (k,) = tuple(cell_to_keys[c])
+            if k not in remaining:
+                continue
+            peel_order.append(k)
+            witness[k] = c
+            remaining.remove(k)
+            for c2 in key_cells[k]:
+                if k in cell_to_keys[c2]:
+                    cell_to_keys[c2].remove(k)
+                    deg[c2] -= 1
+                    if deg[c2] == 1:
+                        q.append(c2)
+
+        if remaining:
+            return [], {}
+        # Return in ASSIGNMENT order (reverse of peeling)
+        return list(reversed(peel_order)), witness
+
+    # Adjust reseed helper to new return signature
+    def build_with_reseeds(self, keys, max_tries=16):
+        for _ in range(max_tries):
+            order, witness = self.find_peeling_order(keys)
+            if order:
+                return order, witness
+            self.salt = self._splitmix64(self.salt + 0x9E3779B97F4A7C15)
+        return [], {}
+
+    # Replace construct’s insertion loop: drop taken_cells and zero-sentinel logic.
     def construct(self, neighbor_count, adj_list) -> bool:
         if neighbor_count != len(list(adj_list.items())[0][1]):
             return False
 
         self.neighb_count = neighbor_count
         self.key_amount = (neighbor_count * len(adj_list.keys())) * 3
-        self.table = np.zeros((self.key_amount, ), dtype=np.int64)
+        self.table = np.zeros((self.key_amount,), dtype=np.int64)
 
-        # process adj list into proper insertion format
+        # expand (node -> neighbors[0..neighbor_count-1]) into keyed pairs via Cantor pairing
         new_adj_list = {}
-        debug_map = {}
         for key, value in adj_list.items():
-            for i in range(0, neighbor_count):
-                debug_map[(key, i)] = self.key_hasher(key, i)
+            for i in range(neighbor_count):
                 new_adj_list[self.key_hasher(key, i)] = value[i]
         adj_list = new_adj_list
 
-        # get all hashes for each key
-        taken_cells = {i: set([]) for i in range(self.key_amount+1)}
-        for key, _ in adj_list.items():
-            taken_cells[self.hash1(key)].add(key)
-            taken_cells[self.hash2(key)].add(key)
-            taken_cells[self.hash3(key)].add(key)
+        # peel
+        order, witness = self.find_peeling_order(adj_list.keys())
+        if not order:
+            return False
 
-        peeling_order = self.find_peeling_order(adj_list.keys())
+        assigned = np.zeros(self.key_amount, dtype=bool)
 
-        # insert each key value pair in the correct peeling order
-        # a key is peelable if:
-        #   - it has at least one cell that is not assigned yet
-        #     AND
-        #   - isn't needed by another key 
-        for key in peeling_order:
-            value = adj_list[key]
-            hashes = self.get_hashes(key)
-            if any(self.table[h] == 0 and len(taken_cells[h]) == 1 for h in hashes):
-                if all(self.table[h] != 0 for h in hashes):
-                    #   - no cells open (something went wrong)
-                    return False
-                # insertion math: 
-                # table[x] xor table[y] xor table[z] = v 
-                # for k -> v where x = h1(k), y = h2(k), z = h3(k)
+        # assign in reverse-peel order using recorded witness cell
+        for k in order:
+            v = int(adj_list[k])
+            h1, h2, h3 = self.get_hashes(k)
+            c_star = witness[k]  # the unique cell for this key during peel
+            others = [h for h in (h1, h2, h3) if h != c_star]
 
-                #   - some or all cells open
-                #       - Substitute assigned values into equation
-                #       - Pick arbitrary values for all but one unassigned cell
-                #       - Compute the remaining cell
-                equation_values = [value]
-                cell_to_solve_for = -1
-                for h in hashes:
-                    cellvalue = self.table[h]
-                    if self.table[h] == 0:
-                        if cell_to_solve_for == -1:
-                            cell_to_solve_for = h
-                            continue
-
-                        cellvalue = np.random.randint(0, 255) 
-                        self.table[h] = cellvalue
-                    equation_values.append(cellvalue)
-
-                self.table[cell_to_solve_for] = np.bitwise_xor.reduce(equation_values)
-            else:
-                print(f"failed to insert key: {key} with value: {value}")
+            rhs = v
+            for h in others:
+                rhs ^= int(self.table[h])  # other cells already assigned by construction
+            self.table[c_star] = rhs
+            assigned[c_star] = True
 
         return True
-                
+
     def get_neighbors(self, node):
         neighbors = [child for child in self.child_iter(node)]
         return np.array(neighbors)
@@ -139,7 +140,7 @@ class BloomierFilter:
 
 # network = {
 #     1: [3, 2],
-#     2: [3, 4],
+#     2: [3, 4],x
 #     3: [2, 1],
 #     4: [2, 3]
 # }
