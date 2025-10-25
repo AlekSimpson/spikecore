@@ -1,38 +1,42 @@
 import numpy as np
 from dataclasses import dataclass
 
-MASK64: int = (1 << 64) - 1
+# Use full 64-bit mask (unsigned)
+MASK64 = np.uint64(0xFFFFFFFFFFFFFFFF)
+
 
 @dataclass
 class BloomierFilter:
     table: np.ndarray = None
     key_amount: int = -1
     neighb_count: int = -1
-    salt: int = 0x243F6A8885A308D3  # or random 64-bit
+    salt = np.uint64(0x243F6A8885A308D3)  # or random 64-bit
 
     def key_hasher(self, key, n):
         return ((key + n) * (key + n + 1)) // 2 + n
+
     def _splitmix64(self, x):
-        # add once in your class
-        x = (x + 0x9E3779B97F4A7C15) & MASK64
-        z = x
-        z ^= (z >> 30)
-        z = (z * 0xBF58476D1CE4E5B9) & MASK64
-        z ^= (z >> 27)
-        z = (z * 0x94D049BB133111EB) & MASK64
-        z ^= (z >> 31)
+        # Normalize to unsigned 64-bit array (works for scalars and arrays)
+        x = np.asarray(x, dtype=np.uint64)
+        # SplitMix64 steps
+        x = (x + np.uint64(0x9E3779B97F4A7C15)) & MASK64
+        z = x.copy()
+        z ^= (z >> np.uint64(30))
+        z = (z * np.uint64(0xBF58476D1CE4E5B9)) & MASK64
+        z ^= (z >> np.uint64(27))
+        z = (z * np.uint64(0x94D049BB133111EB)) & MASK64
+        z ^= (z >> np.uint64(31))
         return z & MASK64
 
     def get_hashes(self, key):
-        # robust, independent-ish indices; dedup to avoid double-decrement bugs
+        # Scalar hashing; return Python ints
+        key = np.uint64(key)
         x = (key ^ self.salt) & MASK64
-        h1 = self._splitmix64(x) % self.key_amount
-        h2 = self._splitmix64(x + 1) % self.key_amount
-        h3 = self._splitmix64(x + 0x9D) % self.key_amount
+        h1 = int(self._splitmix64(x) % np.uint64(self.key_amount))
+        h2 = int(self._splitmix64(x + np.uint64(1)) % np.uint64(self.key_amount))
+        h3 = int(self._splitmix64(x + np.uint64(0x9D)) % np.uint64(self.key_amount))
         return h1, h2, h3
 
-    # Replace find_peeling_order to RECORD the witness cell for each key and
-    # to return the order already reversed for assignment.
     def find_peeling_order(self, keys):
         key_cells = {}
         max_cell = -1
@@ -77,19 +81,20 @@ class BloomierFilter:
 
         if remaining:
             return [], {}
-        # Return in ASSIGNMENT order (reverse of peeling)
         return list(reversed(peel_order)), witness
 
-    # Adjust reseed helper to new return signature
     def build_with_reseeds(self, keys, max_tries=16):
         for _ in range(max_tries):
             order, witness = self.find_peeling_order(keys)
             if order:
                 return order, witness
-            self.salt = self._splitmix64(self.salt + 0x9E3779B97F4A7C15)
+            # advance salt deterministically, keep dtype
+            self.salt = self._splitmix64(self.salt + np.uint64(0x9E3779B97F4A7C15)).astype(np.uint64)
+            # If result is array (shouldn’t be), force scalar
+            if isinstance(self.salt, np.ndarray):
+                self.salt = np.uint64(self.salt.item())
         return [], {}
 
-    # Replace construct’s insertion loop: drop taken_cells and zero-sentinel logic.
     def construct(self, neighbor_count, adj_list) -> bool:
         if neighbor_count != len(list(adj_list.items())[0][1]):
             return False
@@ -105,85 +110,40 @@ class BloomierFilter:
                 new_adj_list[self.key_hasher(key, i)] = value[i]
         adj_list = new_adj_list
 
-        # peel
         order, witness = self.find_peeling_order(adj_list.keys())
         if not order:
             return False
 
         assigned = np.zeros(self.key_amount, dtype=bool)
 
-        # assign in reverse-peel order using recorded witness cell
         for k in order:
             v = int(adj_list[k])
             h1, h2, h3 = self.get_hashes(k)
-            c_star = witness[k]  # the unique cell for this key during peel
+            c_star = witness[k]
             others = [h for h in (h1, h2, h3) if h != c_star]
 
             rhs = v
             for h in others:
-                rhs ^= int(self.table[h])  # other cells already assigned by construction
+                rhs ^= int(self.table[h])
             self.table[c_star] = rhs
             assigned[c_star] = True
 
         return True
 
     def get_neighbors(self, nodes):
-        nodes = np.atleast_1d(nodes)
-        n_nodes = len(nodes)
-    
-        # Vectorize Cantor pairing
-        indices = np.arange(self.neighb_count)
+        nodes = np.atleast_1d(nodes).astype(np.int64)
+        indices = np.arange(self.neighb_count, dtype=np.int64)
         keys = ((nodes[:, None] + indices) * (nodes[:, None] + indices + 1)) // 2 + indices
-    
-        # Vectorize hashing
-        x = (keys ^ self.salt) & MASK64
-        h1 = self._splitmix64_vec(x) % self.key_amount
-        h2 = self._splitmix64_vec(x + 1) % self.key_amount  
-        h3 = self._splitmix64_vec(x + 0x9D) % self.key_amount
-    
-        # Vectorize XOR
+        # vectorized hashing in uint64
+        x = (keys.astype(np.uint64) ^ self.salt) & MASK64
+        h1 = (self._splitmix64(x) % np.uint64(self.key_amount)).astype(np.int64)
+        h2 = (self._splitmix64(x + np.uint64(1)) % np.uint64(self.key_amount)).astype(np.int64)
+        h3 = (self._splitmix64(x + np.uint64(0x9D)) % np.uint64(self.key_amount)).astype(np.int64)
         result = self.table[h1] ^ self.table[h2] ^ self.table[h3]
-        return result
+        return result if result.ndim > 1 else result.ravel()
 
     def child_iter(self, node):
         for i in range(0, self.neighb_count):
             hashes = self.get_hashes(self.key_hasher(node, i))
-            cells = np.array([self.table[h] for h in hashes])
+            cells = np.array([self.table[h] for h in hashes], dtype=np.int64)
             yield np.bitwise_xor.reduce(cells)
-
-
-# network = {
-#     1: [3, 2],
-#     2: [3, 4],
-#     3: [2, 1],
-#     4: [2, 3]
-# }
-# 
-# bf = BloomierFilter()
-# success = bf.construct(2, network)
-# 
-# if success:
-#     print("bloomier filter created successfully")
-# else:
-#     print("failed to construct bloom filter")
-# 
-# 
-# print(f"neighbors of 1: {bf.get_neighbors(1)} | actual: [3, 2]")
-# print(f"neighbors of 2: {bf.get_neighbors(2)} | actual: [3, 4]")
-# print(f"neighbors of 3: {bf.get_neighbors(3)} | actual: [2, 1]")
-# print(f"neighbors of 4: {bf.get_neighbors(4)} | actual: [2, 3]")
-        
-        
-        
-        
-        
-        
-        
-        
-
-
-
-
-
-    
-    
