@@ -127,9 +127,23 @@ class BloomierFilter:
 
         return True
 
-    def get_neighbors(self, node):
-        neighbors = [child for child in self.child_iter(node)]
-        return np.array(neighbors)
+    def get_neighbors(self, nodes):
+        nodes = np.atleast_1d(nodes)
+        n_nodes = len(nodes)
+    
+        # Vectorize Cantor pairing
+        indices = np.arange(self.neighb_count)
+        keys = ((nodes[:, None] + indices) * (nodes[:, None] + indices + 1)) // 2 + indices
+    
+        # Vectorize hashing
+        x = (keys ^ self.salt) & MASK64
+        h1 = self._splitmix64_vec(x) % self.key_amount
+        h2 = self._splitmix64_vec(x + 1) % self.key_amount  
+        h3 = self._splitmix64_vec(x + 0x9D) % self.key_amount
+    
+        # Vectorize XOR
+        result = self.table[h1] ^ self.table[h2] ^ self.table[h3]
+        return result
 
     def child_iter(self, node):
         for i in range(0, self.neighb_count):
@@ -140,7 +154,7 @@ class BloomierFilter:
 
 # network = {
 #     1: [3, 2],
-#     2: [3, 4],x
+#     2: [3, 4],
 #     3: [2, 1],
 #     4: [2, 3]
 # }

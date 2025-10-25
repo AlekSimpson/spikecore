@@ -29,6 +29,9 @@ class WeightMatrix:
         self.check = check_indexing
         self.size = n
 
+    def get_neighbors(self, i):
+        return self.bloomier.get_neighbors(i)
+
     @dataclass
     class _At:
         owner: "WeightMatrix"
@@ -94,6 +97,7 @@ class WeightMatrix:
             raise TypeError(f"Key {key} is not a 2-tuple")
 
         return i,j
+
     def __getitem__(self, key):
         i,j = self.__checkkey__(key)
         return np.einsum('...k,...k->...', self.U[i], self.V[j])
