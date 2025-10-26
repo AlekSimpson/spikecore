@@ -128,21 +128,24 @@ class BloomierFilter:
         return True
 
     def get_neighbors(self, nodes):
-        nodes = np.atleast_1d(nodes)
-        n_nodes = len(nodes)
+        nodes = np.atleast_1d(nodes).astype(np.uint64)
+        # n_nodes = len(nodes)
     
         # Vectorize Cantor pairing
-        indices = np.arange(self.neighb_count)
-        keys = ((nodes[:, None] + indices) * (nodes[:, None] + indices + 1)) // 2 + indices
+        indices = np.arange(self.neighb_count, dtype=np.uint64)
+        keys = ((nodes[:, None] + indices) * (nodes[:, None] + indices + np.uint64(1))) // np.uint64(2) + indices
     
         # Vectorize hashing
-        x = (keys ^ self.salt) & MASK64
-        h1 = self._splitmix64_vec(x) % self.key_amount
-        h2 = self._splitmix64_vec(x + 1) % self.key_amount  
-        h3 = self._splitmix64_vec(x + 0x9D) % self.key_amount
+        x = (keys ^ np.uint64(self.salt)) & MASK64
+        h1 = self._splitmix64(x) % np.uint64(self.key_amount)
+        h2 = self._splitmix64(x + np.uint64(1)) %  np.uint64(self.key_amount) 
+        h3 = self._splitmix64(x + np.uint64(0x9D)) % np.uint64(self.key_amount)
     
-        # Vectorize XOR
-        result = self.table[h1] ^ self.table[h2] ^ self.table[h3]
+        h1_idx = h1.astype(np.int64)
+        h2_idx = h2.astype(np.int64)
+        h3_idx = h3.astype(np.int64)
+        result = self.table[h1_idx] ^ self.table[h2_idx] ^ self.table[h3_idx]
+
         return result
 
     def child_iter(self, node):

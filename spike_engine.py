@@ -4,6 +4,13 @@ from weights import WeightMatrix
 import threading, queue
 import ipywidgets as w
 import plotly.graph_objects as go, time
+from IPython.display import display
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from PIL import Image
+import io
+from tqdm import tqdm
+from dataclasses import dataclass
 import warnings
 warnings.filterwarnings("error")
 
@@ -38,24 +45,28 @@ class SpikeEngine:
         self.DECAY_RATE = decay_rate
         self.LEARNING_RATE = learning_rate # 0.0033
         self.SPIKE_PERIOD = 3
+        self.SPIKE_THRESHOLD = 1
 
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
+        print("Constructing weight matrix...")
         self.weights = WeightMatrix(network, rank, weight_initializer())
+        print("Weights constructed.")
         self.last_tick_updated = np.zeros((self.neuron_count, ))
         self.neuron_inputs = np.zeros((self.neuron_count, ))
+        self.inputs = np.zeros((self.neuron_count, ))
         self.membrane_potentials = np.empty((self.neuron_count, ), dtype=np.float32)
         self.membrane_potentials.fill(self.RESTING_MP)
 
-        self.mp_logs = np.zeros((self.neuron_total, self.lifetime), dtype=np.float32)
-        self.last_spiked = np.zeros((self.neuron_total, ))
+        self.mp_logs = np.zeros((self.neuron_count, 0), dtype=np.float32)
+        self.last_spiked = np.zeros((self.neuron_count, ))
         self.keybinds = {}
 
         self.alive = True
 
         # initial setup
         self.fig = go.FigureWidget()
-        self.fig.add_trace(go.Heatmapgl(
+        self.fig.add_trace(go.Heatmap(
             z=np.zeros(self.shape),
             colorscale="Viridis",
             zmin=0,
@@ -106,11 +117,6 @@ class SpikeEngine:
             ),
         )
 
-        # make the figure a square
-        display(self.fig)
-        minvs = []
-        maxvs = []
-
         # frame interval slider (interactive)
         self.frame_interval = w.IntSlider(
             value=5, 
@@ -120,7 +126,7 @@ class SpikeEngine:
             description="Frame N", 
             continuous_update=True
         )
-        self.viz_buffer = np.zeros(self.viz_grid_size, dtype=np.float32)
+        self.viz_buffer = np.zeros(self.shape, dtype=np.float32)
 
         # async display thread
         self.viz_q = queue.Queue(maxsize=2)
@@ -129,6 +135,12 @@ class SpikeEngine:
         # double-buffer latest frame (lock-protected)
         self.latest_frame = {"data": None, "t": -float("inf")}
         self.latest_lock = threading.Lock()
+
+        self.recorded_frames = []
+
+    def _setup_lifetime(self, lifetime: int):
+        self.lifetime = lifetime
+        self.mp_logs = np.zeros((self.neuron_count, self.lifetime), dtype=np.float32)
 
     def viz_loop(self):
         last_drawn_t = -float("inf")
@@ -164,10 +176,10 @@ class SpikeEngine:
         self.viz_thread.start()
         display(self.frame_interval)
 
-    def set_input_neurons(self, input_list): 
+    def set_input_neurons(self, input_list: list): 
         if input_list == None:
             return
-        self.input_neurons = input_list
+        self.input_neurons = np.array(input_list)
 
     def set_live_input_keybindings(self, bindings: dict):
         """
@@ -180,30 +192,102 @@ class SpikeEngine:
         self.keybinds = bindings
         self.live_input_vector = np.zeros((len(self.input_neurons), ))
 
-    def start_live_static(self, inputs, lifetime):
+    def capture_frame(self):
+        if self.recording:
+            img_bytes = self.fig.to_image(format="png", width=800, height=800)
+            self.recorded_frames.append(img_bytes)
+
+    def save_video(self, filename="spike_animation.mp4", fps=30):
+        if not self.recorded_frames:
+            print("No frames recorded!")
+            return
+
+        # Convert image bytes to numpy arrays
+        frames = []
+        for img_bytes in self.recorded_frames:
+            img = Image.open(io.BytesIO(img_bytes))
+            frames.append(np.array(img))
+
+        # Create matplotlib figure and animation
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.axis('off')
+
+        # Display first frame
+        im = ax.imshow(frames[0])
+
+        def update_frame(frame_num):
+            im.set_array(frames[frame_num])
+            return [im]
+
+        # Create animation
+        anim = animation.FuncAnimation(
+            fig, update_frame, 
+            frames=len(frames), 
+            interval=1000/fps,
+            blit=True
+        )
+
+        # Save using FFMpegWriter (or PillowWriter if ffmpeg not available)
+        writer = animation.FFMpegWriter(fps=fps, bitrate=1800)
+        anim.save(filename, writer=writer)
+        print(f"Video saved as {filename}")
+
+        plt.close(fig)
+        self.recorded_frames = []
+
+    def start_live_static(self, inputs: np.ndarray, lifetime: int):
         # live, pre-determined network inputs, pre-determined simulation lifetime
         pass
 
-    def start_static(self, input_spikes, lifetime):
+    def start_static(self, input_spikes: np.ndarray, lifetime: int):
         # recorded, pre-determined network inputs, pre-determined simulation lifetime
 
-        self.lifetime = lifetime
+        self._setup_lifetime(lifetime)
         tick = 0
 
-        if not self.input_neurons:
+        if len(self.input_neurons) == 0:
             print("Set input neurons before starting the simulation.")
             return
 
-        while tick <= self.lifetime:
-            self.inputs[self.input_neurons] += input_spikes[tick]
-            self.step(tick)
-            self.mp_logs[:, tick] = self.membrane_potentials
-            tick += 1
+        print("Beginning recording...")
+        self.recording = True
+
+        with tqdm(total=self.lifetime) as progress:
+            while tick < self.lifetime:
+                self.inputs[self.input_neurons] += input_spikes[tick]
+                self.step(tick)
+                self.mp_logs[:, tick] = self.membrane_potentials
+
+                if tick % 5 == 0:
+                    self.fig.data[0].z = self.membrane_potentials.reshape(self.shape)
+                    self.capture_frame()
+
+                tick += 1
+                progress.update(1)
+
+        self.recording = False
+        self.save_video("spike_simulation.mp4", fps=60)
+        print("Recording saved.")
+
+    def on_press(self, key):
+        try:
+            if key.char == 'q':
+                self.alive = False
+
+            if key.char in self.keybinds:
+                self.live_input_vector[self.keybinds[key.char]] = 1
+            print(f'Key pressed: {key.char}')
+        except AttributeError:
+            print(f'Special key pressed: {key}')
+
+    def on_release(self, key):
+        if key.char != 'q' and key in self.keybinds:
+            self.live_input_vector[self.keybinds[key.char]] = 0
 
     def start_dynamic(self):
         # live, undetermined dynamic network inputs, undetermined simulation lifetime
 
-        self.lifetime = -1
+        self._setup_lifetime(-1)
         tick = 0
 
         if not self.input_neurons:
@@ -211,8 +295,8 @@ class SpikeEngine:
             return
 
         listener = keyboard.Listener(
-            on_press=on_press, 
-            on_release=on_release
+            on_press=self.on_press, 
+            on_release=self.on_release
         )
         listener.start()
 
@@ -240,7 +324,7 @@ class SpikeEngine:
                         pass
                     finally:
                         try:
-                            viz_q.put_nowait((self.mP_grid, tick))
+                            self.viz_q.put_nowait((self.mP_grid, tick))
                         except queue.Full:
                             pass
 
@@ -266,8 +350,11 @@ class SpikeEngine:
 
         self.stdp(tick, neurons)
 
-        child_neurons = self.weights.get_neighbors[neurons]
-        self.inputs[child_neurons] += self.weights[neurons, child_neurons]
+        children = self.weights.get_neighbors(neurons)
+        self.inputs[children.ravel()] += self.weights[
+            np.broadcast_to(neurons[:, None], children.shape).ravel(), 
+            children.ravel()
+        ]
 
     def decay(self, neurons):
         self.membrane_potentials[neurons] += (self.RESTING_MP - self.membrane_potentials[neurons]) * self.DECAY_RATE
@@ -275,37 +362,17 @@ class SpikeEngine:
     def stdp(self, tick, neurons):
         children = self.weights.get_neighbors(neurons)
         do_hebb = ~((self.last_spiked[children] == 0) | (self.last_spiked[children] == tick))
+        hebb_neurons = np.broadcast_to(neurons[:, None], children.shape)[do_hebb]
         children = children[do_hebb]
         if np.any(children):
             tick_delta = np.abs(tick - self.last_spiked[children])
             decay_deltas = -self.LEARNING_RATE * tick_delta**-3
-            self.weights.at[neurons, children] <<= decay_deltas
-
-        parents = np.where(tick - self.last_spiked <= self.SPIKE_PERIOD)[0]
-        do_hebb = ~((self.last_spiked[parents] == 0) | (self.last_spiked[parents] == tick))
-        parents = parents[do_hebb]
-        if np.any(parents):
-            tick_delta = np.abs(tick - self.last_spiked[parents])
-            growth_deltas = self.LEARNING_RATE * tick_delta**-3
-            self.weights.at[parents, neurons] <<= growth_deltas
+            self.weights.at[hebb_neurons, children.ravel()] <<= decay_deltas
 
     def rstdp(self, tick):
         pass
 
-    def on_press(self, key):
-        try:
-            if key.char == 'q':
-                self.alive = False
 
-            if key.char in self.keybinds:
-                self.live_input_vector[self.keybinds[key.char]] = 1
-            print(f'Key pressed: {key.char}')
-        except AttributeError:
-            print(f'Special key pressed: {key}')
-
-    def on_release(self, key):
-        if key.char != 'q' and key in self.keybinds:
-            self.live_input_vector[self.keybinds[key.char]] = 0
 
 
 
