@@ -12,7 +12,6 @@ import io
 from tqdm import tqdm
 from dataclasses import dataclass
 import warnings
-warnings.filterwarnings("error")
 
 @dataclass 
 class SpikeEngine:
@@ -268,6 +267,26 @@ class SpikeEngine:
         self.recording = False
         self.save_video("spike_simulation.mp4", fps=60)
         print("Recording saved.")
+
+    def start_static_logfile(self, input_spikes: np.ndarray, lifetime: int, filename: str):
+        self._setup_lifetime(lifetime)
+        tick = 0
+        if len(self.input_neurons) == 0:
+            print("Set input neurons before starting the simulation.")
+            return
+        self.recording = True
+        with tqdm(total=self.lifetime) as progress:
+            with open(filename, "wb") as f:
+                f.write(self.neuron_count.to_bytes(4, "big"))
+                while tick < self.lifetime:
+                    self.inputs[self.input_neurons] += input_spikes[tick]
+                    self.step(tick)
+                    f.write(self.membrane_potentials.tobytes())
+                    tick += 1
+                    progress.update(1)
+        self.recording = False
+        print(f"Recording saved: {filename}")
+
 
     def on_press(self, key):
         try:
