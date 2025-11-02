@@ -23,7 +23,7 @@ class WeightMatrix:
 
         self.bloomier = BloomierFilter()
         self.bloomier.construct(*children_counts, network)
-        self.network = network
+        # self.network = network
         self.U = U
         self.V = V
         self.check = check_indexing
