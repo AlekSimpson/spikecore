@@ -43,7 +43,7 @@ class SpikeEngine:
         self.RESTING_MP = resting_mp
         self.DECAY_RATE = decay_rate
         self.LEARNING_RATE = learning_rate # 0.0033
-        self.SPIKE_PERIOD = 3
+        self.SPIKE_PERIOD = 1
         self.SPIKE_THRESHOLD = 1
 
         self.shape = shape
@@ -116,15 +116,6 @@ class SpikeEngine:
             ),
         )
 
-        # frame interval slider (interactive)
-        self.frame_interval = w.IntSlider(
-            value=5, 
-            min=1, 
-            max=100, 
-            step=1, 
-            description="Frame N", 
-            continuous_update=True
-        )
         self.viz_buffer = np.zeros(self.shape, dtype=np.float32)
 
         # async display thread
@@ -135,10 +126,11 @@ class SpikeEngine:
         self.latest_frame = {"data": None, "t": -float("inf")}
         self.latest_lock = threading.Lock()
 
-        self.recorded_frames = []
-
     def _setup_lifetime(self, lifetime: int):
         self.lifetime = lifetime
+        if lifetime < 0:
+            return
+
         self.mp_logs = np.zeros((self.neuron_count, self.lifetime), dtype=np.float32)
 
     def viz_loop(self):
@@ -161,7 +153,7 @@ class SpikeEngine:
                         self.fig.data[0].z = mP_grid  # WebGL uploads to GPU here
                     last_drawn_t = cur_t
 
-            except queue.Empty:
+            except queue.Empty as e:
                 pass
         
             time.sleep(0.01)
@@ -173,7 +165,7 @@ class SpikeEngine:
             name="viz_thread"
         )
         self.viz_thread.start()
-        display(self.frame_interval)
+        display(self.fig)
 
     def set_input_neurons(self, input_list: list): 
         if input_list == None:
@@ -189,7 +181,6 @@ class SpikeEngine:
             return
         
         self.keybinds = bindings
-        self.live_input_vector = np.zeros((len(self.input_neurons), ))
 
     def start_static_record(self, input_spikes: np.ndarray, lifetime: int, filename: str):
         self._setup_lifetime(lifetime)
@@ -210,29 +201,27 @@ class SpikeEngine:
         self.recording = False
         print(f"Recording saved: {filename}")
 
-
     def on_press(self, key):
         try:
             if key.char == 'q':
                 self.alive = False
 
             if key.char in self.keybinds:
-                self.live_input_vector[self.keybinds[key.char]] = 1
+                self.inputs[self.keybinds[key.char]] += 1
             print(f'Key pressed: {key.char}')
         except AttributeError:
             print(f'Special key pressed: {key}')
 
     def on_release(self, key):
-        if key.char != 'q' and key in self.keybinds:
-            self.live_input_vector[self.keybinds[key.char]] = 0
+        pass
 
-    def start_dynamic(self):
+    def start_dynamic(self, granularity=1):
         # live, undetermined dynamic network inputs, undetermined simulation lifetime
 
         self._setup_lifetime(-1)
         tick = 0
 
-        if not self.input_neurons:
+        if len(self.input_neurons) == 0:
             print("Set input neurons before starting the simulation.")
             return
 
@@ -245,12 +234,11 @@ class SpikeEngine:
         self.start_visual_loop()
 
         while self.alive:
-            self.inputs[self.input_neurons] += self.live_input_vector
+            # self.inputs[self.input_neurons] += self.live_input_vector
             self.step(tick)
             tick += 1
 
-            N = max(1, int(self.frame_interval.value))
-            if tick % N == 0:
+            if tick % granularity == 0:
                 np.copyto(
                     self.viz_buffer,
                     self.membrane_potentials.reshape(self.shape)
@@ -266,9 +254,11 @@ class SpikeEngine:
                         pass
                     finally:
                         try:
-                            self.viz_q.put_nowait((self.mP_grid, tick))
+                            self.viz_q.put_nowait((self.membrane_potentials.reshape(self.shape), tick))
                         except queue.Full:
                             pass
+            time.sleep(0.1)
+        listener.stop()
 
     def step(self, tick):
         self.membrane_potentials += self.inputs
