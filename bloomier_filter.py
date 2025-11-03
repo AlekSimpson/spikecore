@@ -4,7 +4,6 @@ from dataclasses import dataclass
 # Use full 64-bit mask (unsigned)
 MASK64 = np.uint64(0xFFFFFFFFFFFFFFFF)
 
-
 @dataclass
 class BloomierFilter:
     table: np.ndarray = None

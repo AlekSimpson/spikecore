@@ -51,7 +51,6 @@ class SpikeEngine:
         print("Constructing weight matrix...")
         self.weights = WeightMatrix(network, rank, weight_initializer())
         print("Weights constructed.")
-        self.last_tick_updated = np.zeros((self.neuron_count, ))
         self.neuron_inputs = np.zeros((self.neuron_count, ))
         self.inputs = np.zeros((self.neuron_count, ))
         self.membrane_potentials = np.empty((self.neuron_count, ), dtype=np.float32)
@@ -215,8 +214,14 @@ class SpikeEngine:
     def on_release(self, key):
         pass
 
-    def start_dynamic(self, granularity=1):
+    def start_dynamic(self, granularity=1, speed=0):
         # live, undetermined dynamic network inputs, undetermined simulation lifetime
+        if speed < 0:
+            print("'speed' parameter only slows simulation down. Cannot be negative.")
+            return 
+        if granularity < 0:
+            print("granularity must be greater than 0.")
+            return
 
         self._setup_lifetime(-1)
         tick = 0
@@ -257,14 +262,13 @@ class SpikeEngine:
                             self.viz_q.put_nowait((self.membrane_potentials.reshape(self.shape), tick))
                         except queue.Full:
                             pass
-            time.sleep(0.1)
+            time.sleep(speed)
         listener.stop()
 
     def step(self, tick):
         self.membrane_potentials += self.inputs
 
         self.inputs.fill(0)
-        self.last_tick_updated[:] = tick
 
         self.membrane_potentials[(tick - self.last_spiked) == self.SPIKE_PERIOD] = self.RESTING_MP 
 
