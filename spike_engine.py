@@ -1,5 +1,3 @@
-from pynput import keyboard
-import numpy as np
 from weights import WeightMatrix
 import threading, queue
 import ipywidgets as w
@@ -29,6 +27,7 @@ class SpikeEngine:
     last_tick_updated: np.ndarray
     live_input_vector: np.ndarray
     alive: bool
+    import numpy as np
 
     def __init__(
         self, 
@@ -39,6 +38,7 @@ class SpikeEngine:
         resting_mp=0.1,
         decay_rate=0.01,
         learning_rate=0.00222):
+        from pynput import keyboard
 
         self.RESTING_MP = resting_mp
         self.DECAY_RATE = decay_rate
@@ -49,7 +49,7 @@ class SpikeEngine:
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
-        self.weights = WeightMatrix(network, rank, weight_initializer())
+        self.weights = WeightMatrix(network, rank=rank, weight_initializer=weight_initializer)
         print("Weights constructed.")
         self.neuron_inputs = np.zeros((self.neuron_count, ))
         self.inputs = np.zeros((self.neuron_count, ))
@@ -347,7 +347,7 @@ class SpikeEngineCUDA:
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
-        self.weights = WeightMatrixCUDA(network, rank, weight_initializer())
+        self.weights = WeightMatrixCUDA(network, rank, weight_initializer)
         print("Weights constructed.")
         self.neuron_inputs = cp.zeros((self.neuron_count, ))
         self.inputs = cp.zeros((self.neuron_count, ))
@@ -356,7 +356,6 @@ class SpikeEngineCUDA:
 
         self.mp_logs = cp.zeros((self.neuron_count, 0), dtype=np.float32)
         self.last_spiked = cp.zeros((self.neuron_count, ))
-        self.keybinds = {}
 
         self.alive = True
 
@@ -371,16 +370,6 @@ class SpikeEngineCUDA:
         if input_list == None:
             return
         self.input_neurons = np.array(input_list)
-
-    def set_live_input_keybindings(self, bindings: dict):
-        """
-        bindings: keybind char -> input neuron id
-        """
-        if not self.input_neurons:
-            print("Cannot set live input keybinds if no input neurons are set")
-            return
-        
-        self.keybinds = bindings
 
     def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
         self._setup_lifetime(lifetime)
