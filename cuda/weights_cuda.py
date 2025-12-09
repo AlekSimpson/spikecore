@@ -1,6 +1,6 @@
 import cupy as cp
 from dataclasses import dataclass
-from bloomier_filter import BloomierFilter
+from bloomier_filter_cuda import BloomierFilterCUDA
 
 @dataclass
 class WeightMatrixCUDA:
@@ -16,12 +16,12 @@ class WeightMatrixCUDA:
         n = len(network.keys())
 
         if rank is None:
-            rank = cp.ceil(0.05 * n).astype(cp.int64)
+            rank = int(cp.ceil(0.05 * n))
 
         k = rank
-        U,V = weight_initializer(size=(2, n, k))
+        U,V = weight_initializer(size=(2, n, k)).astype(cp.float32)
 
-        self.bloomier = BloomierFilter()
+        self.bloomier = BloomierFilterCUDA()
         self.bloomier.construct(*children_counts, network)
         # self.network = network
         self.U = U
@@ -47,7 +47,7 @@ class WeightMatrixCUDA:
             return self
 
         def __setitem__(self, key, value):
-            if value is not WeightMatrix._NO_STORE:
+            if value is not WeightMatrixCUDA._NO_STORE:
                 raise NotImplementedError("Use '<<=' via .at, direct setting is unsupported.")
             self.key = None  # clear after augmented-assignment write-back
 
@@ -56,11 +56,11 @@ class WeightMatrixCUDA:
                 raise TypeError("The .at interface must be indexed!")
             i, j = self.key
             self.owner.update(i, j, delta)
-            return WeightMatrix._NO_STORE
+            return WeightMatrixCUDA._NO_STORE
 
     @property
     def at(self):
-        return WeightMatrix._At(self)
+        return WeightMatrixCUDA._At(self)
 
     @dataclass
     class _Children:
@@ -83,7 +83,7 @@ class WeightMatrixCUDA:
             yield from self.owner.bloomier.child_iter(self.key)
     @property
     def children(self):
-        return WeightMatrix._Children(self)
+        return WeightMatrixCUDA._Children(self)
 
     def __checkkey__(self,key):
         if self.check:
@@ -148,5 +148,3 @@ class WeightMatrixCUDA:
 
 
 
-def create_weight_matrix(uncompressed_shape) -> WeightMatrix:
-    pass

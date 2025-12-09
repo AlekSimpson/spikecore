@@ -1,5 +1,6 @@
 import cupy as cp
 from dataclasses import dataclass
+from collections import deque
 
 # Use full 64-bit mask (unsigned)
 MASK64 = cp.uint64(0xFFFFFFFFFFFFFFFF)
@@ -53,7 +54,6 @@ class BloomierFilterCUDA:
             for c in cells:
                 cell_to_keys[c].add(k)
 
-        from collections import deque
         deg = [len(s) for s in cell_to_keys]
         q = deque([c for c, d in enumerate(deg) if d == 1])
 
