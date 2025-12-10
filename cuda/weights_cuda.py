@@ -1,12 +1,21 @@
 import cupy as cp
 from dataclasses import dataclass
 from bloomier_filter_cuda import BloomierFilterCUDA
+import math
+
 
 @dataclass
 class WeightMatrixCUDA:
     _NO_STORE = object()
 
-    def __init__(self, network: dict, rank: int = None, check_indexing: bool = True, weight_initializer:callable = cp.random.normal):
+    def __init__(
+        self, 
+        network: dict, 
+        rank: int = None, 
+        check_indexing: bool = True, 
+        weight_initializer:callable = cp.random.normal, 
+        save_network=True):
+        
         children_counts = {len(c) for c in network.values()}
         if len(children_counts) == 0:
             raise TypeError("?????")
@@ -16,13 +25,17 @@ class WeightMatrixCUDA:
         n = len(network.keys())
 
         if rank is None:
-            rank = int(cp.ceil(0.05 * n))
+            rank = math.ceil(0.05 * n)
 
         k = rank
         U,V = weight_initializer(size=(2, n, k)).astype(cp.float32)
 
         self.bloomier = BloomierFilterCUDA()
         self.bloomier.construct(*children_counts, network)
+
+        if save_network:
+            self.network = network
+            
         self.U = U
         self.V = V
         self.check = check_indexing
