@@ -94,6 +94,11 @@ class BloomierFilter:
                 self.salt = np.uint64(self.salt.item())
         return [], {}
 
+    def check_topology_cached():
+        
+        
+        pass
+
     def construct(self, neighbor_count, adj_list) -> bool:
         if neighbor_count != len(list(adj_list.items())[0][1]):
             return False

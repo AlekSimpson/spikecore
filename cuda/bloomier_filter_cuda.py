@@ -1,6 +1,10 @@
-import cupy as cp
 from dataclasses import dataclass
 from collections import deque
+from pathlib import Path
+from tqdm import tqdm
+import cupy as cp
+import hashlib
+import json
 
 # Use full 64-bit mask (unsigned)
 MASK64 = cp.uint64(0xFFFFFFFFFFFFFFFF)
@@ -94,7 +98,45 @@ class BloomierFilterCUDA:
                 self.salt = cp.uint64(self.salt.item())
         return [], {}
 
+    def hash_topology(self, obj):
+       s = str(obj).encode()
+       return hashlib.sha256(s).hexdigest()       
+
+    def check_topology_cached(self, topology_hash):
+        list_is_cached = Path("./.spikecore.cache/hashes.json").exists()
+
+        # if running for first time, auto-create cache directory if it does not exist
+        Path("./.spikecore.cache/").mkdir(parents=True, exist_ok=True)
+        Path("./.spikecore.cache/hashes.json").touch(exist_ok=True)
+        
+        if not list_is_cached:
+            print("list not cached")
+            return False
+
+        try:
+            with open("./.spikecore.cache/hashes.json", "r") as file:
+                cache_data = json.load(file)
+            print(topology_hash in cache_data.keys())
+            return topology_hash in cache_data.keys()
+        except:
+            print("list not cached")
+            return False
+
     def construct(self, neighbor_count, adj_list) -> bool:
+        list_hash = self.hash_topology(adj_list)
+        data = {}
+        if self.check_topology_cached(list_hash):
+            print("Weight topology cache detected. Loading from cache.")
+            with open("./.spikecore.cache/hashes.json", "r") as file:
+                data = json.load(file)
+                saved_params = data[list_hash] 
+                self.table = cp.array(saved_params[0])
+                self.key_amount = saved_params[1]
+                self.neighb_count = saved_params[2]
+                self.salt = saved_params[3]
+                
+            return True
+        
         if neighbor_count != len(list(adj_list.items())[0][1]):
             return False
 
@@ -109,13 +151,15 @@ class BloomierFilterCUDA:
                 new_adj_list[self.key_hasher(key, i)] = value[i]
         adj_list = new_adj_list
 
+        print("Finding peeling order...")
         order, witness = self.find_peeling_order(adj_list.keys())
+        print("Done.")
         if not order:
             return False
 
         assigned = cp.zeros(self.key_amount, dtype=bool)
 
-        for k in order:
+        for k in tqdm(order, desc="Constructing Bloomier Filter..."):
             v = int(adj_list[k])
             h1, h2, h3 = self.get_hashes(k)
             c_star = witness[k]
@@ -127,6 +171,10 @@ class BloomierFilterCUDA:
             self.table[c_star] = rhs
             assigned[c_star] = True
 
+        data[list_hash] = (self.table.get().tolist(), self.key_amount, self.neighb_count, int(self.salt))
+        with open("./.spikecore.cache/hashes.json", "w") as file:
+            json.dump(data, file, indent=2)
+            
         return True
 
     def get_neighbors(self, nodes):

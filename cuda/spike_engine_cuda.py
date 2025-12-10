@@ -38,7 +38,6 @@ class SpikeEngineCUDA:
         resting_mp=0.1,
         decay_rate=0.01,
         learning_rate=0.00222):
-        print("spike engine initializing")
 
         self.RESTING_MP = resting_mp
         self.DECAY_RATE = decay_rate
@@ -47,7 +46,6 @@ class SpikeEngineCUDA:
         self.SPIKE_THRESHOLD = 1
 
         self.shape = shape
-        print("constants loaded")
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
         self.weights = WeightMatrixCUDA(network, rank, weight_initializer)

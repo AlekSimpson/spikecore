@@ -23,7 +23,6 @@ class WeightMatrixCUDA:
 
         self.bloomier = BloomierFilterCUDA()
         self.bloomier.construct(*children_counts, network)
-        # self.network = network
         self.U = U
         self.V = V
         self.check = check_indexing
@@ -34,7 +33,7 @@ class WeightMatrixCUDA:
 
     @dataclass
     class _At:
-        owner: "WeightMatrix"
+        owner: "WeightMatrixCUDA"
         key: tuple | None = None
 
         def __getitem__(self, key):
@@ -64,7 +63,7 @@ class WeightMatrixCUDA:
 
     @dataclass
     class _Children:
-        owner: "WeightMatrix"
+        owner: "WeightMatrixCUDA"
         key: int | None = None
 
         def __getitem__(self, key):
