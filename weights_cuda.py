@@ -8,7 +8,14 @@ import math
 class WeightMatrixCUDA:
     _NO_STORE = object()
 
-    def __init__(self, network: dict, rank: int = None, check_indexing: bool = True, weight_initializer:callable = cp.random.normal):
+    def __init__(
+        self, 
+        network: dict, 
+        rank: int = None, 
+        check_indexing: bool = True, 
+        weight_initializer:callable = cp.random.normal, 
+        save_network=True):
+        
         children_counts = {len(c) for c in network.values()}
         if len(children_counts) == 0:
             raise TypeError("?????")
@@ -25,7 +32,10 @@ class WeightMatrixCUDA:
 
         self.bloomier = BloomierFilterCUDA()
         self.bloomier.construct(*children_counts, network)
-        self.network = network
+
+        if save_network:
+            self.network = network
+            
         self.U = U
         self.V = V
         self.check = check_indexing
@@ -36,7 +46,7 @@ class WeightMatrixCUDA:
 
     @dataclass
     class _At:
-        owner: "WeightMatrix"
+        owner: "WeightMatrixCUDA"
         key: tuple | None = None
 
         def __getitem__(self, key):
@@ -66,7 +76,7 @@ class WeightMatrixCUDA:
 
     @dataclass
     class _Children:
-        owner: "WeightMatrix"
+        owner: "WeightMatrixCUDA"
         key: int | None = None
 
         def __getitem__(self, key):
