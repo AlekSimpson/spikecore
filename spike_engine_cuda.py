@@ -12,6 +12,73 @@ import cupy as cp
 import warnings
 import io
 
+step_src = r'''
+
+extern "C" __global__
+
+int* get_neighbors(
+    unsigned long long bf_salt,
+    unsigned long long bf_MASK64,
+    const int bf_key_amount,
+    int bf_neighb_count
+) {
+
+}
+
+
+void step_kernel(
+    int tick,
+    const int SPIKE_PERIOD,
+    const int SPIKE_THRESHOLD,
+    const float LEARNING_RATE,
+    const float DECAY_RATE,
+    const float RESTING_MP,
+    unsigned long long bf_salt,
+    unsigned long long bf_MASK64,
+    const int bf_key_amount,
+    const float* __restrict__ U,
+    const float* __restrict__ V,
+    int* bf_table,
+    int bf_neighb_count,
+    float* __restrict__ inputs,
+    float* __restrict__ membrane_potentials,
+    int* __restrict__ last_spiked
+) {
+    int neuron_thread_id = blockDim.x * blockId.x + threadIdx.x;
+    if (neuron_thread_id >= N) return; // one thread per neuron
+
+    membrane_potentials[neuron_thread_id] = membrane_potentials[neuron_thread_id] + inputs[neuron_thread_id];
+    inputs[neuron_thread_id] = 0;
+
+    int time_last_spiked = last_spiked[neuron_thread_id];
+    if ((tick - time_last_spiked) == SPIKE_PERIOD) {
+        membrane_potentials[neuron_thread_id] = RESTING_MP;
+        return;
+    }
+
+    if (membrane_potentials[neuron_thread_id] > SPIKE_THRESHOLD) {
+        // spike
+
+        if ((tick - time_last_spiked) > SPIKE_PREIOD) {
+            last_spiked[neuron_thread_id] = tick;
+        }
+
+        // stdp hebb rule
+        int* children = 
+
+
+        return;
+    }
+
+    // otherwise decay and end
+    float neuron_mp = membrane_potentials[neuron_thread_id];
+    membrane_potentials[neuron_thread_id] = neuron_mp + (RESTING_MP - neuron_mp) * DECAY_RATE
+
+}
+
+ '''
+ step_kernel = cp.RawKernel(step_src, "step_kernel")
+
 @dataclass
 class SpikeEngineCUDA:
     neuron_count: int
@@ -39,26 +106,28 @@ class SpikeEngineCUDA:
         decay_rate=0.01,
         learning_rate=0.00222):
 
-        self.RESTING_MP = resting_mp
-        self.DECAY_RATE = decay_rate
-        self.LEARNING_RATE = learning_rate # 0.0033
-        self.SPIKE_PERIOD = 1
-        self.SPIKE_THRESHOLD = 1
+        self.RESTING_MP = cp.float32(resting_mp)
+        self.DECAY_RATE = cp.float32(decay_rate)
+        self.LEARNING_RATE = cp.float32(learning_rate ) # 0.0033
+        self.SPIKE_PERIOD = cp.int32(1)
+        self.SPIKE_THRESHOLD = cp.int32(1)
 
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
         self.weights = WeightMatrixCUDA(network, rank, weight_initializer)
         print("Weights constructed.")
-        self.neuron_inputs = cp.zeros((self.neuron_count, ))
-        self.inputs = cp.zeros((self.neuron_count, ))
+        self.inputs = cp.zeros((self.neuron_count, ), dtype=cp.float32)
         self.membrane_potentials = cp.empty((self.neuron_count, ), dtype=cp.float32)
         self.membrane_potentials.fill(self.RESTING_MP)
 
         self.mp_logs = cp.zeros((self.neuron_count, 0), dtype=cp.float32)
-        self.last_spiked = cp.zeros((self.neuron_count, ))
+        self.last_spiked = cp.zeros((self.neuron_count, ), dtype=cp.int32)
 
         self.alive = True
+
+        self.threads = 256
+        self.blocks = (self.neuron_count + self.threads - 1) // self.threads
 
     def _setup_lifetime(self, lifetime: int):
         self.lifetime = lifetime
@@ -91,7 +160,32 @@ class SpikeEngineCUDA:
         self.recording = False
         print(f"Recording saved: {filename}")
 
-    def step(self, tick):
+    def step(self, tick, prototype=True):
+        if prototype:
+            return step_kernel(
+                (self.blocks, ), (self.threads, ),
+                (
+                    tick,
+                    self.SPIKE_PERIOD,
+                    self.SPIKE_THRESHOLD,
+                    self.LEARNING_RATE,
+                    self.DECAY_RATE,
+                    self.RESTING_MP,
+                    ,
+                    ,
+                    ,
+                    self.weights.U,
+                    self.weights.V,
+                    self.weights.bloomier.table,
+                    self.inputs,
+                    self.membrane_potentials,
+                    self.last_spiked
+                )
+            )
+
+        step_a(tick)
+
+    def step_a(self, tick):
         self.membrane_potentials += self.inputs
 
         self.inputs.fill(0)

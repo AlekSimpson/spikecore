@@ -1,3 +1,4 @@
+from collections import defaultdict
 from dataclasses import dataclass
 from collections import deque
 from pathlib import Path
@@ -5,6 +6,8 @@ from tqdm import tqdm
 import cupy as cp
 import hashlib
 import json
+import time
+import numpy as np
 
 # Use full 64-bit mask (unsigned)
 MASK64 = cp.uint64(0xFFFFFFFFFFFFFFFF)
@@ -33,58 +36,90 @@ class BloomierFilterCUDA:
         return z & MASK64
 
     def get_hashes(self, key):
-        # Scalar hashing; return Python ints
         key = cp.uint64(key)
         x = (key ^ self.salt) & MASK64
-        h1 = int(self._splitmix64(x) % cp.uint64(self.key_amount))
-        h2 = int(self._splitmix64(x + cp.uint64(1)) % cp.uint64(self.key_amount))
-        h3 = int(self._splitmix64(x + cp.uint64(0x9D)) % cp.uint64(self.key_amount))
-        return h1, h2, h3
+        h = cp.array((3, ), dtype=cp.uint64)
+        h.fill(x)
+        h = h + cp.array([cp.uint64(0), cp.uint64(1), cp.uint64(0x9D)], dtype=cp.uint64)
+
+        # split mix64 steps
+        h = (h + cp.uint64(0x9E3779B97F4A7C15)) & MASK64
+        # z = h.copy()
+        h ^= (h >> cp.uint64(30))
+        h = (h * cp.uint64(0xBF58476D1CE4E5B9)) & MASK64
+        h ^= (h >> cp.uint64(27))
+        h = (h * cp.uint64(0x94D049BB133111EB)) & MASK64
+        h ^= (h >> cp.uint64(31))
+        h = h & MASK64
+        h = h % cp.uint64(self.key_amount)
+        return h.get().tolist()
 
     def find_peeling_order(self, keys):
+        keycells_matrix = cp.zeros((len(keys), 4), dtype=cp.uint64)
+        keycells_matrix[:, 0] += cp.array(keys, dtype=cp.uint64) 
+        keycells_matrix[:, 1] += cp.array(keys, dtype=cp.uint64) 
+        keycells_matrix[:, 2] += cp.array(keys, dtype=cp.uint64) 
+        keycells_matrix[:, 3] += cp.array(keys, dtype=cp.uint64) 
+        
+        keycells_matrix[:, 1:] = (keycells_matrix[:, 1:] ^ self.salt) & MASK64
+        keycells_matrix[:, 2] += cp.uint64(1) 
+        keycells_matrix[:, 3] += cp.uint64(0x9D)
+
+        keycells_matrix[:, 1:] += cp.uint64(0x9E3779B97F4A7C15)
+        keycells_matrix[:, 1:] ^= (keycells_matrix[:, 1:] >> cp.uint64(30))
+        keycells_matrix[:, 1:] = (keycells_matrix[:, 1:] * cp.uint64(0xBF58476D1CE4E5B9)) & MASK64
+        keycells_matrix[:, 1:] ^= (keycells_matrix[:, 1:] >> cp.uint64(27))
+        keycells_matrix[:, 1:] = (keycells_matrix[:, 1:] * cp.uint64(0x94D049BB133111EB)) & MASK64
+        keycells_matrix[:, 1:] ^= (keycells_matrix[:, 1:] >> cp.uint64(31))
+        keycells_matrix[:, 1:] = keycells_matrix[:, 1:] & MASK64
+        keycells_matrix[:, 1:] = keycells_matrix[:, 1:] % cp.uint64(self.key_amount)
+
+        max_cell = keycells_matrix.max().get()
         key_cells = {}
-        max_cell = -1
-        for k in keys:
-            cells = tuple(sorted(set(self.get_hashes(k))))
-            key_cells[k] = cells
-            if cells:
-                max_cell = max(max_cell, max(cells))
+        for i, k in tqdm(enumerate(keys), total=len(keys), desc="Building key cells"):
+            key_cells[k] = keycells_matrix[i, 1:].get().tolist()
         if max_cell < 0:
-            return [], {}
+            return [], {}, {}
 
         m = max_cell + 1
-        cell_to_keys = [set() for _ in range(m)]
+        cell_to_keys = [None] * m
         for k, cells in key_cells.items():
             for c in cells:
+                if cell_to_keys[c] is None:
+                    cell_to_keys[c] = set()
                 cell_to_keys[c].add(k)
-
-        deg = [len(s) for s in cell_to_keys]
+        deg = [len(s) if s is not None else 0 for s in cell_to_keys]
         q = deque([c for c, d in enumerate(deg) if d == 1])
-
+        
         remaining = set(keys)
         peel_order = []
         witness = {}
+        max_iterations = max(len(q), len(remaining))
 
-        while q and remaining:
-            c = q.popleft()
-            if deg[c] != 1:
-                continue
-            (k,) = tuple(cell_to_keys[c])
-            if k not in remaining:
-                continue
-            peel_order.append(k)
-            witness[k] = c
-            remaining.remove(k)
-            for c2 in key_cells[k]:
-                if k in cell_to_keys[c2]:
-                    cell_to_keys[c2].remove(k)
-                    deg[c2] -= 1
-                    if deg[c2] == 1:
-                        q.append(c2)
-
-        if remaining:
-            return [], {}
-        return list(reversed(peel_order)), witness
+        with tqdm(total=max_iterations, desc="Creating peeling order") as pbar:
+            while q and remaining:
+                c = q.popleft()
+                if deg[c] != 1:
+                    continue
+                (k,) = tuple(cell_to_keys[c])
+                if k not in remaining:
+                    continue
+                peel_order.append(k)
+                witness[k] = c
+                remaining.remove(k)
+                for c2 in key_cells[k]:
+                    if k in cell_to_keys[c2]:
+                        cell_to_keys[c2].remove(k)
+                        deg[c2] -= 1
+                        if deg[c2] == 1:
+                            q.append(c2)
+                pbar.update(1)
+                        
+        if len(remaining) != 0:
+            print("peeling failed")
+            return [], {}, {}
+            
+        return list(reversed(peel_order)), witness, key_cells
 
     def build_with_reseeds(self, keys, max_tries=16):
         for _ in range(max_tries):
@@ -110,17 +145,14 @@ class BloomierFilterCUDA:
         Path("./.spikecore.cache/hashes.json").touch(exist_ok=True)
         
         if not list_is_cached:
-            print("list not cached")
             return False
 
         try:
             with open("./.spikecore.cache/hashes.json", "r") as file:
                 cache_data = json.load(file)
-            print(topology_hash in cache_data.keys())
             return topology_hash in cache_data.keys()
         except:
             print("list not cached")
-            return False
 
     def construct(self, neighbor_count, adj_list) -> bool:
         list_hash = self.hash_topology(adj_list)
@@ -152,22 +184,25 @@ class BloomierFilterCUDA:
         adj_list = new_adj_list
 
         print("Finding peeling order...")
-        order, witness = self.find_peeling_order(adj_list.keys())
-        print("Done.")
+        start = time.perf_counter()
+        order, witness, key_cells = self.find_peeling_order(list(adj_list.keys()))
+        end = time.perf_counter()
+        print(f"Done in {end - start:.4f} seconds.")
         if not order:
             return False
 
         assigned = cp.zeros(self.key_amount, dtype=bool)
 
-        for k in tqdm(order, desc="Constructing Bloomier Filter..."):
+        for k in tqdm(order, desc="Constructing Bloomier Filter"):
             v = int(adj_list[k])
-            h1, h2, h3 = self.get_hashes(k)
+            H = key_cells[k]
             c_star = witness[k]
-            others = [h for h in (h1, h2, h3) if h != c_star]
+            others = np.array([h for h in H if h != c_star])
 
             rhs = v
             for h in others:
                 rhs ^= int(self.table[h])
+            
             self.table[c_star] = rhs
             assigned[c_star] = True
 
@@ -181,7 +216,8 @@ class BloomierFilterCUDA:
         nodes = cp.atleast_1d(nodes).astype(cp.int64)
         indices = cp.arange(self.neighb_count, dtype=cp.int64)
         keys = ((nodes[:, None] + indices) * (nodes[:, None] + indices + 1)) // 2 + indices
-        # vectorized hashing in uint64
+
+        
         x = (keys.astype(cp.uint64) ^ self.salt) & MASK64
         h1 = (self._splitmix64(x) % cp.uint64(self.key_amount)).astype(cp.int64)
         h2 = (self._splitmix64(x + cp.uint64(1)) % cp.uint64(self.key_amount)).astype(cp.int64)

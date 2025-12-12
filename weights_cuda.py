@@ -2,6 +2,63 @@ import cupy as cp
 from dataclasses import dataclass
 from bloomier_filter_cuda import BloomierFilterCUDA
 import math
+import time
+
+kernel_src = r'''
+extern "C" __global__
+void update_kernel(
+    float* U,
+    float* V,
+    const float* U_anchor,
+    const float* V_anchor,
+    const int* If,
+    const int* Jf,
+    const float* Df,
+    const int* inv_i,
+    const int* inv_j,
+    int n_pairs,
+    int k,
+    float lr,
+    float l2_reg
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_pairs) return;
+    
+    int i_idx = If[idx];
+    int j_idx = Jf[idx];
+    float delta = Df[idx];
+    int anchor_i = inv_i[idx];
+    int anchor_j = inv_j[idx];
+    
+    float den_v = l2_reg;
+    float den_u = l2_reg;
+
+    float vj_d;
+    float ui_d;
+    
+    for (int d = 0; d < k; ++d) {
+        vj_d = V[j_idx * k + d];
+        ui_d = U[i_idx * k + d];
+        den_v += vj_d * vj_d;
+        den_u += ui_d * ui_d;
+    }
+    
+    for (int d = 0; d < k; ++d) {
+        vj_d = V[j_idx * k + d];
+        ui_d = U[i_idx * k + d];
+        float u_anchor_d = U_anchor[anchor_i * k + d];
+        float v_anchor_d = V_anchor[anchor_j * k + d];
+        
+        float du = lr * (delta * (vj_d / den_v) - l2_reg * (ui_d - u_anchor_d));
+        float dv = lr * (delta * (ui_d / den_u) - l2_reg * (vj_d - v_anchor_d));
+        
+        atomicAdd(&U[i_idx * k + d], du);
+        atomicAdd(&V[j_idx * k + d], dv);
+    }
+}
+'''
+
+update_kernel = cp.RawKernel(kernel_src, 'update_kernel')
 
 plastic_src = r'''
 extern "C" __global__
@@ -195,19 +252,18 @@ class WeightMatrixCUDA:
         U_anchor = self.U[Ui_unique].copy()
         V_anchor = self.V[Vj_unique].copy()
 
+        n_pairs = len(If)
+        k = self.U.shape[1]
+        block_size = 512
+        grid_size = (n_pairs + block_size - 1) // block_size
+
         for _ in range(iters):
-            ui = self.U[If]                      # (P,k)
-            vj = self.V[Jf]                      # (P,k)
-
-            den_v = cp.sum(vj**2, axis=1, keepdims=True) + l2_reg
-            den_u = cp.sum(ui**2, axis=1, keepdims=True) + l2_reg
-
-            du = lr * (Df[:, None] * (vj / den_v) - l2_reg * (ui - U_anchor[inv_i]))
-            dv = lr * (Df[:, None] * (ui / den_u) - l2_reg * (vj - V_anchor[inv_j]))
-
-            # scatter-add back to rows/cols; handles repeats in I/J
-            cp.add.at(self.U, If, du)
-            cp.add.at(self.V, Jf, dv)
+            update_kernel(
+                (grid_size,), (block_size,),
+                (self.U, self.V, U_anchor, V_anchor,
+                 If, Jf, Df, inv_i, inv_j,
+                 n_pairs, k, cp.float32(lr), cp.float32(l2_reg))
+            )        
 
     def plastic_step(self,
                      children_flat,
