@@ -1,0 +1,242 @@
+from weights_cuda import WeightMatrixCUDA
+import matplotlib.animation as animation
+import plotly.graph_objects as go, time
+from IPython.display import display
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+import threading, queue
+import ipywidgets as w
+from PIL import Image
+from tqdm import tqdm
+import cupy as cp
+import warnings
+import io
+
+step_src = r'''
+
+extern "C" __global__
+
+int* get_neighbors(
+    unsigned long long bf_salt,
+    unsigned long long bf_MASK64,
+    const int bf_key_amount,
+    int bf_neighb_count
+) {
+
+}
+
+
+void step_kernel(
+    int tick,
+    const int SPIKE_PERIOD,
+    const int SPIKE_THRESHOLD,
+    const float LEARNING_RATE,
+    const float DECAY_RATE,
+    const float RESTING_MP,
+    unsigned long long bf_salt,
+    unsigned long long bf_MASK64,
+    const int bf_key_amount,
+    const float* __restrict__ U,
+    const float* __restrict__ V,
+    int* bf_table,
+    int bf_neighb_count,
+    float* __restrict__ inputs,
+    float* __restrict__ membrane_potentials,
+    int* __restrict__ last_spiked
+) {
+    int neuron_thread_id = blockDim.x * blockId.x + threadIdx.x;
+    if (neuron_thread_id >= N) return; // one thread per neuron
+
+    membrane_potentials[neuron_thread_id] = membrane_potentials[neuron_thread_id] + inputs[neuron_thread_id];
+    inputs[neuron_thread_id] = 0;
+
+    int time_last_spiked = last_spiked[neuron_thread_id];
+    if ((tick - time_last_spiked) == SPIKE_PERIOD) {
+        membrane_potentials[neuron_thread_id] = RESTING_MP;
+        return;
+    }
+
+    if (membrane_potentials[neuron_thread_id] > SPIKE_THRESHOLD) {
+        // spike
+
+        if ((tick - time_last_spiked) > SPIKE_PREIOD) {
+            last_spiked[neuron_thread_id] = tick;
+        }
+
+        // stdp hebb rule
+        int* children = 
+
+
+        return;
+    }
+
+    // otherwise decay and end
+    float neuron_mp = membrane_potentials[neuron_thread_id];
+    membrane_potentials[neuron_thread_id] = neuron_mp + (RESTING_MP - neuron_mp) * DECAY_RATE
+
+}
+
+ '''
+ step_kernel = cp.RawKernel(step_src, "step_kernel")
+
+@dataclass
+class SpikeEngineCUDA:
+    neuron_count: int
+    membrane_potentials: cp.ndarray
+    weights: WeightMatrixCUDA
+    RESTING_MP: float
+    DECAY_RATE: float
+    LEARNING_RATE: float
+    SPIKE_PERIOD: int
+    spike_threshold: int
+    lifetime: int
+    input_neurons: cp.ndarray
+    neuron_inputs: cp.ndarray
+    last_tick_updated: cp.ndarray
+    live_input_vector: cp.ndarray
+    alive: bool
+
+    def __init__(
+        self, 
+        network: dict, 
+        shape: tuple,
+        rank: int = None, 
+        weight_initializer: callable = cp.random.normal, 
+        resting_mp=0.1,
+        decay_rate=0.01,
+        learning_rate=0.00222):
+
+        self.RESTING_MP = cp.float32(resting_mp)
+        self.DECAY_RATE = cp.float32(decay_rate)
+        self.LEARNING_RATE = cp.float32(learning_rate ) # 0.0033
+        self.SPIKE_PERIOD = cp.int32(1)
+        self.SPIKE_THRESHOLD = cp.int32(1)
+
+        self.shape = shape
+        self.neuron_count = self.shape[0] * self.shape[1]
+        print("Constructing weight matrix...")
+        self.weights = WeightMatrixCUDA(network, rank, weight_initializer)
+        print("Weights constructed.")
+        self.inputs = cp.zeros((self.neuron_count, ), dtype=cp.float32)
+        self.membrane_potentials = cp.empty((self.neuron_count, ), dtype=cp.float32)
+        self.membrane_potentials.fill(self.RESTING_MP)
+
+        self.mp_logs = cp.zeros((self.neuron_count, 0), dtype=cp.float32)
+        self.last_spiked = cp.zeros((self.neuron_count, ), dtype=cp.int32)
+
+        self.alive = True
+
+        self.threads = 256
+        self.blocks = (self.neuron_count + self.threads - 1) // self.threads
+
+    def _setup_lifetime(self, lifetime: int):
+        self.lifetime = lifetime
+        if lifetime < 0:
+            return
+
+        self.mp_logs = cp.zeros((self.neuron_count, self.lifetime), dtype=cp.float32)
+
+    def set_input_neurons(self, input_list: list): 
+        if input_list == None:
+            return
+        self.input_neurons = cp.array(input_list)
+
+    def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
+        self._setup_lifetime(lifetime)
+        tick = 0
+        if len(self.input_neurons) == 0:
+            print("Set input neurons before starting the simulation.")
+            return
+        self.recording = True
+        with tqdm(total=self.lifetime) as progress:
+            with open(filename, "wb") as f:
+                f.write(self.neuron_count.to_bytes(4, "big"))
+                while tick < self.lifetime:
+                    self.inputs[self.input_neurons] += input_spikes[tick]
+                    self.step(tick)
+                    f.write(self.membrane_potentials.tobytes())
+                    tick += 1
+                    progress.update(1)
+        self.recording = False
+        print(f"Recording saved: {filename}")
+
+    def step(self, tick, prototype=True):
+        if prototype:
+            return step_kernel(
+                (self.blocks, ), (self.threads, ),
+                (
+                    tick,
+                    self.SPIKE_PERIOD,
+                    self.SPIKE_THRESHOLD,
+                    self.LEARNING_RATE,
+                    self.DECAY_RATE,
+                    self.RESTING_MP,
+                    ,
+                    ,
+                    ,
+                    self.weights.U,
+                    self.weights.V,
+                    self.weights.bloomier.table,
+                    self.inputs,
+                    self.membrane_potentials,
+                    self.last_spiked
+                )
+            )
+
+        step_a(tick)
+
+    def step_a(self, tick):
+        self.membrane_potentials += self.inputs
+
+        self.inputs.fill(0)
+
+        self.membrane_potentials[(tick - self.last_spiked) == self.SPIKE_PERIOD] = self.RESTING_MP 
+
+        neurons_to_spike = cp.where(self.membrane_potentials > self.SPIKE_THRESHOLD)[0]
+        self.spike(tick, neurons_to_spike)
+
+        neurons_to_decay = cp.where(self.membrane_potentials <= self.SPIKE_THRESHOLD)[0]
+        self.decay(neurons_to_decay)
+
+    def spike(self, tick, neurons):
+        last_spikes = self.last_spiked[neurons]
+        expired = (tick - last_spikes) > self.SPIKE_PERIOD
+        expired_neurons = neurons[expired]
+        self.last_spiked[expired_neurons] = tick
+
+        self.stdp(tick, neurons)
+
+        children = self.weights.get_neighbors(neurons)
+        self.inputs[children.ravel()] += self.weights[
+            cp.broadcast_to(neurons[:, None], children.shape).ravel(), 
+            children.ravel()
+        ]
+
+    def decay(self, neurons):
+        self.membrane_potentials[neurons] += (self.RESTING_MP - self.membrane_potentials[neurons]) * self.DECAY_RATE
+
+    def stdp(self, tick, neurons):
+        children = self.weights.get_neighbors(neurons)
+        do_hebb = ~((self.last_spiked[children] == 0) | (self.last_spiked[children] == tick))
+        hebb_neurons = cp.broadcast_to(neurons[:, None], children.shape)[do_hebb]
+        children = children[do_hebb]
+        if cp.any(children):
+            tick_delta = cp.abs(tick - self.last_spiked[children])
+            decay_deltas = -self.LEARNING_RATE * tick_delta**-3
+            self.weights.at[hebb_neurons, children.ravel()] <<= decay_deltas
+
+    def rstdp(self, tick):
+        pass
+
+
+
+
+
+
+
+
+
+
+
+
+
