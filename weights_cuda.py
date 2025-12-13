@@ -16,7 +16,6 @@ void update_kernel(
     const float* Df,
     const int* inv_i,
     const int* inv_j,
-    int n_pairs,
     int k,
     float lr,
     float l2_reg
@@ -42,12 +41,17 @@ void update_kernel(
         den_v += vj_d * vj_d;
         den_u += ui_d * ui_d;
     }
+
+    float u_anchor_d;
+    float v_anchor_d;   
+    float du;
+    float dv;   
     
     for (int d = 0; d < k; ++d) {
         vj_d = V[j_idx * k + d];
         ui_d = U[i_idx * k + d];
-        float u_anchor_d = U_anchor[anchor_i * k + d];
-        float v_anchor_d = V_anchor[anchor_j * k + d];
+        u_anchor_d = U_anchor[anchor_i * k + d];
+        v_anchor_d = V_anchor[anchor_j * k + d];
         
         float du = lr * (delta * (vj_d / den_v) - l2_reg * (ui_d - u_anchor_d));
         float dv = lr * (delta * (ui_d / den_u) - l2_reg * (vj_d - v_anchor_d));
@@ -200,7 +204,7 @@ class WeightMatrixCUDA:
                 (grid_size,), (block_size,),
                 (self.U, self.V, U_anchor, V_anchor,
                  If, Jf, Df, inv_i, inv_j,
-                 n_pairs, k, cp.float32(lr), cp.float32(l2_reg))
+                 k, cp.float32(lr), cp.float32(l2_reg))
             )        
 
     def save(self, filepath):

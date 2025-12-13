@@ -1,4 +1,3 @@
-from collections import defaultdict
 from dataclasses import dataclass
 from collections import deque
 from pathlib import Path
