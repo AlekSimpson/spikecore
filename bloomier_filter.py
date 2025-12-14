@@ -4,7 +4,6 @@ from dataclasses import dataclass
 # Use full 64-bit mask (unsigned)
 MASK64 = np.uint64(0xFFFFFFFFFFFFFFFF)
 
-
 @dataclass
 class BloomierFilter:
     table: np.ndarray = None
@@ -94,6 +93,11 @@ class BloomierFilter:
             if isinstance(self.salt, np.ndarray):
                 self.salt = np.uint64(self.salt.item())
         return [], {}
+
+    def check_topology_cached():
+        
+        
+        pass
 
     def construct(self, neighbor_count, adj_list) -> bool:
         if neighbor_count != len(list(adj_list.items())[0][1]):

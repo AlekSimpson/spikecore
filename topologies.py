@@ -12,3 +12,5 @@ def square_torus(k: int) -> dict[int, list[int]]:
     }
 
 
+
+

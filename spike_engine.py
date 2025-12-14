@@ -1,17 +1,17 @@
-from pynput import keyboard
-import numpy as np
-from weights import WeightMatrix
-import threading, queue
-import ipywidgets as w
+import matplotlib.animation as animation
 import plotly.graph_objects as go, time
 from IPython.display import display
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from PIL import Image
-import io
-from tqdm import tqdm
 from dataclasses import dataclass
+from weights import WeightMatrix
+import matplotlib.pyplot as plt
+from pynput import keyboard
+import threading, queue
+import ipywidgets as w
+from tqdm import tqdm
+from PIL import Image
+import numpy as np
 import warnings
+import io
 
 @dataclass 
 class SpikeEngine:
@@ -49,9 +49,8 @@ class SpikeEngine:
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
-        self.weights = WeightMatrix(network, rank, weight_initializer())
+        self.weights = WeightMatrix(network, rank=rank, weight_initializer=weight_initializer)
         print("Weights constructed.")
-        self.last_tick_updated = np.zeros((self.neuron_count, ))
         self.neuron_inputs = np.zeros((self.neuron_count, ))
         self.inputs = np.zeros((self.neuron_count, ))
         self.membrane_potentials = np.empty((self.neuron_count, ), dtype=np.float32)
@@ -215,8 +214,14 @@ class SpikeEngine:
     def on_release(self, key):
         pass
 
-    def start_dynamic(self, granularity=1):
+    def start_dynamic(self, granularity=1, speed=0):
         # live, undetermined dynamic network inputs, undetermined simulation lifetime
+        if speed < 0:
+            print("'speed' parameter only slows simulation down. Cannot be negative.")
+            return 
+        if granularity < 0:
+            print("granularity must be greater than 0.")
+            return
 
         self._setup_lifetime(-1)
         tick = 0
@@ -257,14 +262,13 @@ class SpikeEngine:
                             self.viz_q.put_nowait((self.membrane_potentials.reshape(self.shape), tick))
                         except queue.Full:
                             pass
-            time.sleep(0.1)
+            time.sleep(speed)
         listener.stop()
 
     def step(self, tick):
         self.membrane_potentials += self.inputs
 
         self.inputs.fill(0)
-        self.last_tick_updated[:] = tick
 
         self.membrane_potentials[(tick - self.last_spiked) == self.SPIKE_PERIOD] = self.RESTING_MP 
 
@@ -303,25 +307,3 @@ class SpikeEngine:
 
     def rstdp(self, tick):
         pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
