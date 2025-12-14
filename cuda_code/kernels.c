@@ -1,6 +1,13 @@
 #define NEIGHB_COUNT <<NEIGHB_COUNT_SUB>>
 #define k <<K_SUB>>
 
+typedef unsigned long long uint64_t;
+typedef long long int64_t;
+typedef unsigned int uint32_t;
+typedef int int32_t;
+typedef unsigned short uint16_t;
+typedef unsigned char uint8_t;
+
 
 __device__
 void update_weight_matrix(
@@ -39,33 +46,37 @@ void update_weight_matrix(
 }
 
 __device__
-int splitmix64(int x, unsigned long long mask) {
-    int z = (x + ((unsigned int)0x9E3779B97F4A7C15)) & mask;
-    z = z ^ (z >> ((unsigned int)30));
-    z = (z * ((unsigned int)0xBF58476D1CE4E5B9)) & mask;
-    z = z ^ (z >> ((unsigned int)27));
-    z = (z * ((unsigned int)0x94D049BB133111EB)) & mask;
-    z = z ^ (z >> (unsigned int)31);
+uint64_t splitmix64(uint64_t x, uint64_t mask) {
+    uint64_t A = 0x9E3779B97F4A7C15;
+    uint64_t B = 0xBF58476D1CE4E5B9;
+    uint64_t C = 0x94D049BB133111EB;
+
+    uint64_t z = (x + A) & mask;
+    z = z ^ (z >> ((uint64_t)30));
+    z = (z * B) & mask;
+    z = z ^ (z >> ((uint64_t)27));
+    z = (z * C) & mask;
+    z = z ^ (z >> (uint64_t)31);
     return z ^ mask;
 }
 
 __device__
 void get_neighbors(
-    const int* __restrict__ bf_table,
-    unsigned long long bf_salt,
-    unsigned long long bf_MASK64,
-    const int bf_key_amount,
-    int* results,
-    int neuron
+    const int64_t* __restrict__ bf_table,
+    uint64_t bf_salt,
+    uint64_t bf_MASK64,
+    const uint64_t bf_key_amount,
+    int64_t* results,
+    int64_t neuron
 ) {
-    int key;
-    int h1, h2, h3;
-    for (int kk = 0; kk < NEIGHB_COUNT; ++kk) {
+    int64_t key;
+    int64_t h1, h2, h3;
+    for (int64_t kk = 0; kk < NEIGHB_COUNT; ++kk) {
         key = ((neuron + kk)*(neuron + kk + 1)) / 2 + kk;
 	key = (key ^ bf_salt) & bf_MASK64;
 	h1 = splitmix64(key, bf_MASK64) % bf_key_amount;
-	h2 = splitmix64(key + 1, bf_MASK64) % bf_key_amount;
-	h3 = splitmix64(key + 0x9D, bf_MASK64) % bf_key_amount;
+	h2 = splitmix64(key + ((uint64_t)1), bf_MASK64) % bf_key_amount;
+	h3 = splitmix64(key + ((uint64_t)0x9D), bf_MASK64) % bf_key_amount;
 
 	results[kk] = bf_table[h1] ^ bf_table[h2] ^ bf_table[h3];
     }
@@ -75,16 +86,16 @@ extern "C" __global__
 void step_kernel(
     int tick,
     const int SPIKE_PERIOD,
-    const int SPIKE_THRESHOLD,
+    const float SPIKE_THRESHOLD,
     const float LEARNING_RATE,
     const float DECAY_RATE,
     const float RESTING_MP,
-    unsigned long long bf_salt,
-    unsigned long long bf_MASK64,
+    uint64_t bf_salt,
+    uint64_t bf_MASK64,
     const int bf_key_amount,
     float* __restrict__ U,
     float* __restrict__ V,
-    const int* __restrict__ bf_table,
+    const int64_t* __restrict__ bf_table,
     int neuron_count,
     float* __restrict__ inputs,
     float* __restrict__ membrane_potentials,
@@ -111,11 +122,13 @@ void step_kernel(
         }
 
         // stdp hebb rule
-	int children[NEIGHB_COUNT];
-        get_neighbors(bf_table, bf_salt, bf_MASK64, bf_key_amount, children, neuron_thread_id);
+	int64_t children[NEIGHB_COUNT];
+        get_neighbors(bf_table, bf_salt, bf_MASK64, (uint64_t)bf_key_amount, children, neuron_thread_id);
 
         for (int c = 0; c < NEIGHB_COUNT; ++c) {
-            int child = children[c];
+            int64_t child = children[c];
+	    // printf("child %d is: %d\n", c, child);
+
             if (!(last_spiked[child] == 0 || last_spiked[child] == tick)) {
                 float tick_delta = (float)(tick - last_spiked[child]);
                 float decay_delta = -LEARNING_RATE * powf(tick_delta, -3);

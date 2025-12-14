@@ -46,7 +46,7 @@ class SpikeEngineCUDA:
         self.DECAY_RATE = cp.float32(decay_rate)
         self.LEARNING_RATE = cp.float32(learning_rate ) # 0.0033
         self.SPIKE_PERIOD = cp.int32(1)
-        self.SPIKE_THRESHOLD = cp.int32(1)
+        self.SPIKE_THRESHOLD = cp.float32(1)
 
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
@@ -81,6 +81,7 @@ class SpikeEngineCUDA:
         step_src = open("cuda_code/kernels.c", "r").read();
         step_src = step_src.replace("<<NEIGHB_COUNT_SUB>>", str(self.weights.bloomier.neighb_count))
         step_src = step_src.replace("<<K_SUB>>", str(self.weights.U.shape[1]))
+        # print(step_src)
         step_kernel = cp.RawKernel(step_src, "step_kernel")
 
         self._setup_lifetime(lifetime)
@@ -95,38 +96,35 @@ class SpikeEngineCUDA:
                 while tick < self.lifetime:
                     self.inputs[self.input_neurons] += input_spikes[tick]
                     self.step(tick, kernel=step_kernel)
-                    # f.write(self.membrane_potentials.get().tobytes())
+                    cp.cuda.Device().synchronize()
+                    f.write(self.membrane_potentials.get().tobytes())
                     tick += 1
                     progress.update(1)
         self.recording = False
         print(f"Recording saved: {filename}")
 
-    def step(self, tick, kernel=None):
-        if kernel is not None:
-            kernel(
-                (self.blocks, ), (self.threads, ),
-                (
-                    tick,
-                    self.SPIKE_PERIOD,
-                    self.SPIKE_THRESHOLD,
-                    self.LEARNING_RATE,
-                    self.DECAY_RATE,
-                    self.RESTING_MP,
-                    self.weights.bloomier.salt,
-                    cp.uint64(0xFFFFFFFFFFFFFFFF),
-                    self.weights.bloomier.key_amount,
-                    self.weights.U,
-                    self.weights.V,
-                    self.weights.bloomier.table,
-                    self.neuron_count,
-                    self.inputs,
-                    self.membrane_potentials,
-                    self.last_spiked
-                )
+    def step(self, tick, kernel):
+        kernel(
+            (self.blocks, ), (self.threads, ),
+            (
+                tick,
+                self.SPIKE_PERIOD,
+                self.SPIKE_THRESHOLD,
+                self.LEARNING_RATE,
+                self.DECAY_RATE,
+                self.RESTING_MP,
+                self.weights.bloomier.salt,
+                cp.uint64(0xFFFFFFFFFFFFFFFF),
+                self.weights.bloomier.key_amount,
+                self.weights.U,
+                self.weights.V,
+                self.weights.bloomier.table,
+                self.neuron_count,
+                self.inputs,
+                self.membrane_potentials,
+                self.last_spiked
             )
-            return
-
-        step_a(tick)
+        )
 
     def step_a(self, tick):
         self.membrane_potentials += self.inputs
