@@ -33,8 +33,8 @@ void update_weight_matrix(
         float du = lr * (delta * (v_anchor[d] / den_v) - l2_reg * (u_anchor[d] - u_anchor[d]));
         float dv = lr * (delta * (u_anchor[d] / den_u) - l2_reg * (v_anchor[d] - v_anchor[d]));
         
-        U[i * k + d] += du;
-        V[j * k + d] += dv;
+	atomicAdd(&U[i * k + d], du);
+	atomicAdd(&V[j * k + d], dv);
     }
 }
 
@@ -135,9 +135,8 @@ void step_kernel(
 	    for (int i = 0; i < k; ++i) {
 		dot += u[i] * v[i];
 	    }
-	    inputs[child] += dot;
+	    atomicAdd(&inputs[child], dot);
         }
-
         return;
     }
 

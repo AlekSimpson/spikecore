@@ -95,7 +95,7 @@ class SpikeEngineCUDA:
                 while tick < self.lifetime:
                     self.inputs[self.input_neurons] += input_spikes[tick]
                     self.step(tick, kernel=step_kernel)
-                    f.write(self.membrane_potentials.get().tobytes())
+                    # f.write(self.membrane_potentials.get().tobytes())
                     tick += 1
                     progress.update(1)
         self.recording = False
@@ -118,7 +118,7 @@ class SpikeEngineCUDA:
                     self.weights.U,
                     self.weights.V,
                     self.weights.bloomier.table,
-                    self.neuron_count,  # <--- add this
+                    self.neuron_count,
                     self.inputs,
                     self.membrane_potentials,
                     self.last_spiked
