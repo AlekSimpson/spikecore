@@ -81,7 +81,6 @@ class SpikeEngineCUDA:
         step_src = open("cuda_code/kernels.c", "r").read();
         step_src = step_src.replace("<<NEIGHB_COUNT_SUB>>", str(self.weights.bloomier.neighb_count))
         step_src = step_src.replace("<<K_SUB>>", str(self.weights.U.shape[1]))
-        # print(step_src)
         step_kernel = cp.RawKernel(step_src, "step_kernel")
 
         self._setup_lifetime(lifetime)
@@ -96,8 +95,7 @@ class SpikeEngineCUDA:
                 while tick < self.lifetime:
                     self.inputs[self.input_neurons] += input_spikes[tick]
                     self.step(tick, kernel=step_kernel)
-                    cp.cuda.Device().synchronize()
-                    f.write(self.membrane_potentials.get().tobytes())
+                    # f.write(self.membrane_potentials.get().tobytes())
                     tick += 1
                     progress.update(1)
         self.recording = False
@@ -125,49 +123,6 @@ class SpikeEngineCUDA:
                 self.last_spiked
             )
         )
-
-    def step_a(self, tick):
-        self.membrane_potentials += self.inputs
-
-        self.inputs.fill(0)
-
-        self.membrane_potentials[(tick - self.last_spiked) == self.SPIKE_PERIOD] = self.RESTING_MP 
-
-        neurons_to_spike = cp.where(self.membrane_potentials > self.SPIKE_THRESHOLD)[0]
-        self.spike(tick, neurons_to_spike)
-
-        neurons_to_decay = cp.where(self.membrane_potentials <= self.SPIKE_THRESHOLD)[0]
-        self.decay(neurons_to_decay)
-
-    def spike(self, tick, neurons):
-        last_spikes = self.last_spiked[neurons]
-        expired = (tick - last_spikes) > self.SPIKE_PERIOD
-        expired_neurons = neurons[expired]
-        self.last_spiked[expired_neurons] = tick
-
-        self.stdp(tick, neurons)
-
-        children = self.weights.get_neighbors(neurons)
-        self.inputs[children.ravel()] += self.weights[
-            cp.broadcast_to(neurons[:, None], children.shape).ravel(), 
-            children.ravel()
-        ]
-
-    def decay(self, neurons):
-        self.membrane_potentials[neurons] += (self.RESTING_MP - self.membrane_potentials[neurons]) * self.DECAY_RATE
-
-    def stdp(self, tick, neurons):
-        children = self.weights.get_neighbors(neurons)
-        do_hebb = ~((self.last_spiked[children] == 0) | (self.last_spiked[children] == tick))
-        hebb_neurons = cp.broadcast_to(neurons[:, None], children.shape)[do_hebb]
-        children = children[do_hebb]
-        if cp.any(children):
-            tick_delta = cp.abs(tick - self.last_spiked[children])
-            decay_deltas = -self.LEARNING_RATE * tick_delta**-3
-            self.weights.at[hebb_neurons, children.ravel()] <<= decay_deltas
-
-    def rstdp(self, tick):
-        pass
 
 
 
