@@ -57,7 +57,7 @@ uint64_t splitmix64(uint64_t x, uint64_t mask) {
     z = z ^ (z >> ((uint64_t)27));
     z = (z * C) & mask;
     z = z ^ (z >> (uint64_t)31);
-    return z ^ mask;
+    return z & mask;
 }
 
 __device__
