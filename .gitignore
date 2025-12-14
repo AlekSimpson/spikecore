@@ -255,3 +255,20 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+# pycaches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+python_modules/
+
+
+# Python cache directories
+*.py[cod]
+__pycache__/
+.pytest_cache/
+
+# SpiRe log files
+*.spire
