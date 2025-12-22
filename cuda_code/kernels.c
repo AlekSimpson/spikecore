@@ -101,6 +101,8 @@ void step_kernel(
     const float RESTING_MP,
     float* __restrict__ U,
     float* __restrict__ V,
+    const int USE_CONSTANT_WEIGHT,
+    const float CONSTANT_WEIGHT,
     const int* __restrict__ neighbors,
     int neuron_count,
     float* __restrict__ inputs,
@@ -161,13 +163,17 @@ void step_kernel(
 		);
             }
 
-            const float* u = U + (size_t)neuron_thread_id * k;
-	    const float* v = V + (size_t)child * k;
-	    float dot = 0.0f;
-	    for (int i = 0; i < k; ++i) {
-		dot += u[i] * v[i];
-	    }
-	    atomicAdd(&inputs[child], dot);
+            float weight = CONSTANT_WEIGHT;
+            if (!USE_CONSTANT_WEIGHT) {
+                const float* u = U + (size_t)neuron_thread_id * k;
+	        const float* v = V + (size_t)child * k;
+	        float dot = 0.0f;
+	        for (int i = 0; i < k; ++i) {
+		    dot += u[i] * v[i];
+	        }
+                weight = dot;
+            }
+	    atomicAdd(&inputs[child], weight);
 
             int prev = atomicExch(&active_gen[child], next_tick);
             if (prev != next_tick) {
@@ -189,7 +195,6 @@ void step_kernel(
     membrane_potentials[neuron_thread_id] = mp;
     last_updated[neuron_thread_id] = tick;
 }
-
 
 
 

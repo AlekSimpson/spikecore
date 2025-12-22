@@ -117,6 +117,8 @@ class WeightMatrixCUDA:
             
         self.U = U
         self.V = V
+        self.constant_weight = None
+        self.use_constant_weight = False
         self.check = check_indexing
         self.size = n
 
@@ -135,6 +137,8 @@ class WeightMatrixCUDA:
         v_val = cp.float32(scale if val >= 0 else -scale)
         self.U.fill(u_val)
         self.V.fill(v_val)
+        self.constant_weight = cp.float32(val)
+
 
 
     @dataclass

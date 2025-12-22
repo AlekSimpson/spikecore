@@ -117,6 +117,7 @@ class SpikeEngineCUDA:
         self.step_kernel = None
         self.add_active_kernel = None
         self.decay_kernel = None
+        self.use_constant_weight = False
 
         self.alive = True
 
@@ -315,12 +316,16 @@ class SpikeEngineCUDA:
         input_period: int = 1,
         scale: float = 1.2,
         freeze_learning: bool = False,
+        use_constant_weight: bool | None = None,
     ) -> tuple[float, float, float]:
         w_accum, w_instant = self.estimate_bifurcation_weight(input_period=input_period)
         target = w_accum * float(scale)
         self.weights.set_constant_weight(target)
         if freeze_learning:
             self.LEARNING_RATE = cp.float32(0)
+        if use_constant_weight is None:
+            use_constant_weight = freeze_learning
+        self.use_constant_weight = bool(use_constant_weight)
         return target, w_accum, w_instant
 
     def step(self, tick: int):
@@ -343,6 +348,8 @@ class SpikeEngineCUDA:
                 self.RESTING_MP,
                 self.weights.U,
                 self.weights.V,
+                cp.int32(1 if self.use_constant_weight else 0),
+                self.weights.constant_weight if self.weights.constant_weight is not None else cp.float32(0),
                 self.weights.neighbors,
                 cp.int32(self.neuron_count),
                 self.inputs,
