@@ -73,6 +73,7 @@ class SpikeEngineCUDA:
         self.active_gen = cp.full((self.neuron_count, ), -1, dtype=cp.int32)
         self.step_kernel = None
         self.add_active_kernel = None
+        self.decay_kernel = None
 
         self.alive = True
 
@@ -92,6 +93,7 @@ class SpikeEngineCUDA:
         step_src = step_src.replace("<<K_SUB>>", str(self.weights.U.shape[1]))
         self.step_kernel = cp.RawKernel(step_src, "step_kernel")
         self.add_active_kernel = cp.RawKernel(step_src, "add_active_kernel")
+        self.decay_kernel = cp.RawKernel(step_src, "decay_kernel")
 
     def _add_active(self, indices: cp.ndarray, tick: int):
         if indices is None or indices.size == 0:
@@ -115,6 +117,23 @@ class SpikeEngineCUDA:
             ),
         )
 
+    def _decay_all(self, tick: int):
+        if self.decay_kernel is None:
+            self._compile_kernels()
+        threads = 256
+        blocks = (self.neuron_count + threads - 1) // threads
+        self.decay_kernel(
+            (blocks,), (threads,),
+            (
+                cp.int32(self.neuron_count),
+                self.membrane_potentials,
+                self.last_updated,
+                self.RESTING_MP,
+                self.DECAY_RATE,
+                cp.int32(tick),
+            ),
+        )
+
     def set_input_neurons(self, input_list: list): 
         if input_list == None:
             return
@@ -128,6 +147,7 @@ class SpikeEngineCUDA:
         record_membrane: bool = True,
         compression: str | None = "auto",
         compression_level: int | None = None,
+        full_decay: bool = True,
     ):
         if self.step_kernel is None:
             self._compile_kernels()
@@ -144,6 +164,8 @@ class SpikeEngineCUDA:
             with self._open_record_file(out_path, comp, compression_level) as f:
                 f.write(self.neuron_count.to_bytes(4, "big"))
                 while tick < self.lifetime:
+                    if full_decay:
+                        self._decay_all(tick)
                     self.inputs[self.input_neurons] += input_spikes[tick]
                     self.next_count.fill(0)
                     self._add_active(self.input_neurons, tick)
@@ -264,7 +286,6 @@ class SpikeEngineCUDA:
                 self.active_gen,
             )
         )
-
 
 
 

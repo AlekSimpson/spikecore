@@ -74,6 +74,23 @@ void add_active_kernel(
 }
 
 extern "C" __global__
+void decay_kernel(
+    int neuron_count,
+    float* __restrict__ membrane_potentials,
+    int* __restrict__ last_updated,
+    const float RESTING_MP,
+    const float DECAY_RATE,
+    int tick
+) {
+    int neuron_thread_id = blockDim.x * blockIdx.x + threadIdx.x;
+    if (neuron_thread_id >= neuron_count) return;
+    float mp = membrane_potentials[neuron_thread_id];
+    mp = RESTING_MP + (mp - RESTING_MP) * (1.0f - DECAY_RATE);
+    membrane_potentials[neuron_thread_id] = mp;
+    last_updated[neuron_thread_id] = tick;
+}
+
+extern "C" __global__
 void step_kernel(
     int tick,
     int next_tick,
@@ -172,7 +189,6 @@ void step_kernel(
     membrane_potentials[neuron_thread_id] = mp;
     last_updated[neuron_thread_id] = tick;
 }
-
 
 
 
