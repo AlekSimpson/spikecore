@@ -1,7 +1,11 @@
 from weights_cuda import WeightMatrixCUDA
 from dataclasses import dataclass
+from pathlib import Path
 from tqdm import tqdm
+import bz2
 import cupy as cp
+import gzip
+import lzma
 import os
 os.environ['CUPY_DUMP_CUDA_SOURCE_ON_ERROR'] = '1'
 
@@ -122,6 +126,8 @@ class SpikeEngineCUDA:
         lifetime: int,
         filename: str,
         record_membrane: bool = True,
+        compression: str | None = "auto",
+        compression_level: int | None = None,
     ):
         if self.step_kernel is None:
             self._compile_kernels()
@@ -133,8 +139,9 @@ class SpikeEngineCUDA:
             return
         input_spikes = cp.asarray(input_spikes, dtype=cp.float32)
         self.recording = True
+        comp, out_path = self._resolve_record_compression(filename, compression)
         with tqdm(total=self.lifetime) as progress:
-            with open(filename, "wb") as f:
+            with self._open_record_file(out_path, comp, compression_level) as f:
                 f.write(self.neuron_count.to_bytes(4, "big"))
                 while tick < self.lifetime:
                     self.inputs[self.input_neurons] += input_spikes[tick]
@@ -149,9 +156,54 @@ class SpikeEngineCUDA:
                     tick += 1
                     progress.update(1)
         self.recording = False
-        print(f"Recording saved: {filename}")
+        print(f"Recording saved: {out_path}")
 
-    def estimate_bifurcation_weight(self, input_period: int = 2) -> tuple[float, float]:
+    def _resolve_record_compression(self, filename: str, compression: str | None) -> tuple[str | None, str]:
+        path = str(filename)
+        if compression is None or compression is False or str(compression).lower() == "none":
+            return None, path
+
+        comp = str(compression).lower()
+        ext_map = {
+            ".xz": "xz",
+            ".lzma": "xz",
+            ".gz": "gz",
+            ".gzip": "gz",
+            ".bz2": "bz2",
+        }
+        if comp == "auto":
+            suffix = Path(path).suffix.lower()
+            return ext_map.get(suffix), path
+
+        if comp in ("xz", "lzma"):
+            comp = "xz"
+        elif comp in ("gz", "gzip"):
+            comp = "gz"
+        elif comp in ("bz2", "bzip2"):
+            comp = "bz2"
+        else:
+            raise ValueError(f"Unsupported compression: {compression}")
+
+        ext = {"xz": ".xz", "gz": ".gz", "bz2": ".bz2"}[comp]
+        if not path.lower().endswith(ext):
+            path = path + ext
+        return comp, path
+
+    def _open_record_file(self, path: str, compression: str | None, level: int | None):
+        if compression is None:
+            return open(path, "wb")
+        if compression == "xz":
+            preset = level if level is not None else 6
+            return lzma.open(path, "wb", preset=preset)
+        if compression == "gz":
+            compresslevel = level if level is not None else 6
+            return gzip.open(path, "wb", compresslevel=compresslevel)
+        if compression == "bz2":
+            compresslevel = level if level is not None else 6
+            return bz2.open(path, "wb", compresslevel=compresslevel)
+        raise ValueError(f"Unsupported compression: {compression}")
+
+    def estimate_bifurcation_weight(self, input_period: int = 1) -> tuple[float, float]:
         """
         Estimate per-spike weight thresholds for propagation.
         Returns (w_accum, w_instant).
@@ -168,12 +220,15 @@ class SpikeEngineCUDA:
 
     def set_constant_weights_near_bifurcation(
         self,
-        input_period: int = 2,
+        input_period: int = 1,
         scale: float = 1.2,
+        freeze_learning: bool = False,
     ) -> tuple[float, float, float]:
         w_accum, w_instant = self.estimate_bifurcation_weight(input_period=input_period)
         target = w_accum * float(scale)
         self.weights.set_constant_weight(target)
+        if freeze_learning:
+            self.LEARNING_RATE = cp.float32(0)
         return target, w_accum, w_instant
 
     def step(self, tick: int):
@@ -209,8 +264,6 @@ class SpikeEngineCUDA:
                 self.active_gen,
             )
         )
-
-
 
 
 
