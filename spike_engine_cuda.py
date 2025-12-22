@@ -7,7 +7,50 @@ import cupy as cp
 import gzip
 import lzma
 import os
+import queue
+import threading
 os.environ['CUPY_DUMP_CUDA_SOURCE_ON_ERROR'] = '1'
+
+
+class _AsyncWriter:
+    def __init__(self, handle, max_chunks: int = 8):
+        self._handle = handle
+        self._queue = queue.Queue(maxsize=max_chunks)
+        self._error = None
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            while True:
+                chunk = self._queue.get()
+                if chunk is None:
+                    break
+                self._handle.write(chunk)
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            try:
+                self._handle.close()
+            except Exception:
+                pass
+
+    def write(self, chunk: bytes):
+        if self._closed:
+            raise ValueError("Async writer is closed.")
+        if self._error is not None:
+            raise self._error
+        self._queue.put(chunk, block=True)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None, block=True)
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
 
 
 @dataclass
@@ -145,13 +188,19 @@ class SpikeEngineCUDA:
         lifetime: int,
         filename: str,
         record_membrane: bool = True,
+        record_stride: int = 1,
         compression: str | None = "auto",
         compression_level: int | None = None,
         full_decay: bool = True,
+        compression_async: bool = False,
+        compression_queue_max: int = 8,
+        compression_chunk_bytes: int = 4 * 1024 * 1024,
     ):
         if self.step_kernel is None:
             self._compile_kernels()
         self._setup_lifetime(lifetime)
+        if record_stride < 1:
+            raise ValueError("record_stride must be >= 1.")
         tick = 0
         input_neurons = getattr(self, "input_neurons", None)
         if input_neurons is None or len(input_neurons) == 0:
@@ -160,23 +209,44 @@ class SpikeEngineCUDA:
         input_spikes = cp.asarray(input_spikes, dtype=cp.float32)
         self.recording = True
         comp, out_path = self._resolve_record_compression(filename, compression)
+        writer = None
+        buffer = None
         with tqdm(total=self.lifetime) as progress:
-            with self._open_record_file(out_path, comp, compression_level) as f:
+            f = self._open_record_file(out_path, comp, compression_level)
+            if compression_async and comp is not None:
+                writer = _AsyncWriter(f, max_chunks=compression_queue_max)
+                buffer = bytearray()
+                buffer.extend(self.neuron_count.to_bytes(4, "big"))
+            else:
                 f.write(self.neuron_count.to_bytes(4, "big"))
-                while tick < self.lifetime:
-                    if full_decay:
-                        self._decay_all(tick)
-                    self.inputs[self.input_neurons] += input_spikes[tick]
-                    self.next_count.fill(0)
-                    self._add_active(self.input_neurons, tick)
-                    self.step(tick)
-                    if record_membrane:
-                        f.write(self.membrane_potentials.get().tobytes())
-                    self.active, self.next_active = self.next_active, self.active
-                    self.active_count, self.next_count = self.next_count, self.active_count
-                    # f.write(self.membrane_potentials.get().tobytes())
-                    tick += 1
-                    progress.update(1)
+
+            while tick < self.lifetime:
+                if full_decay:
+                    self._decay_all(tick)
+                self.inputs[self.input_neurons] += input_spikes[tick]
+                self.next_count.fill(0)
+                self._add_active(self.input_neurons, tick)
+                self.step(tick)
+                if record_membrane and (tick % record_stride == 0):
+                    data = self.membrane_potentials.get().tobytes()
+                    if writer is not None:
+                        buffer.extend(data)
+                        if len(buffer) >= compression_chunk_bytes:
+                            writer.write(bytes(buffer))
+                            buffer.clear()
+                    else:
+                        f.write(data)
+                self.active, self.next_active = self.next_active, self.active
+                self.active_count, self.next_count = self.next_count, self.active_count
+                tick += 1
+                progress.update(1)
+
+            if writer is not None:
+                if buffer:
+                    writer.write(bytes(buffer))
+                writer.close()
+            else:
+                f.close()
         self.recording = False
         print(f"Recording saved: {out_path}")
 
@@ -286,6 +356,3 @@ class SpikeEngineCUDA:
                 self.active_gen,
             )
         )
-
-
-
