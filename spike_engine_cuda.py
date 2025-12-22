@@ -151,6 +151,31 @@ class SpikeEngineCUDA:
         self.recording = False
         print(f"Recording saved: {filename}")
 
+    def estimate_bifurcation_weight(self, input_period: int = 2) -> tuple[float, float]:
+        """
+        Estimate per-spike weight thresholds for propagation.
+        Returns (w_accum, w_instant).
+        - w_accum: minimal constant input (per active tick) to eventually cross threshold.
+        - w_instant: input needed to cross threshold in a single tick.
+        """
+        decay = float(self.DECAY_RATE)
+        resting = float(self.RESTING_MP)
+        threshold = float(self.SPIKE_THRESHOLD)
+        decay_factor = (1.0 - decay) ** float(input_period)
+        w_accum = (threshold - resting) * (1.0 - decay_factor)
+        w_instant = (threshold - resting)
+        return w_accum, w_instant
+
+    def set_constant_weights_near_bifurcation(
+        self,
+        input_period: int = 2,
+        scale: float = 1.2,
+    ) -> tuple[float, float, float]:
+        w_accum, w_instant = self.estimate_bifurcation_weight(input_period=input_period)
+        target = w_accum * float(scale)
+        self.weights.set_constant_weight(target)
+        return target, w_accum, w_instant
+
     def step(self, tick: int):
         if self.step_kernel is None:
             self._compile_kernels()
@@ -184,7 +209,6 @@ class SpikeEngineCUDA:
                 self.active_gen,
             )
         )
-
 
 
 

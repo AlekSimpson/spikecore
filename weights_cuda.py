@@ -125,6 +125,17 @@ class WeightMatrixCUDA:
         out = self.neighbors[nodes]
         return out if out.shape[0] > 1 else out.reshape(-1)
 
+    def set_constant_weight(self, value: float):
+        k = int(self.U.shape[1])
+        if k <= 0:
+            return
+        val = float(value)
+        scale = math.sqrt(abs(val) / k) if val != 0 else 0.0
+        u_val = cp.float32(scale)
+        v_val = cp.float32(scale if val >= 0 else -scale)
+        self.U.fill(u_val)
+        self.V.fill(v_val)
+
 
     @dataclass
     class _At:
