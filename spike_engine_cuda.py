@@ -1,16 +1,7 @@
 from weights_cuda import WeightMatrixCUDA
-import matplotlib.animation as animation
-import plotly.graph_objects as go, time
-from IPython.display import display
 from dataclasses import dataclass
-import matplotlib.pyplot as plt
-import threading, queue
-import ipywidgets as w
-from PIL import Image
 from tqdm import tqdm
 import cupy as cp
-import warnings
-import io
 import os
 os.environ['CUPY_DUMP_CUDA_SOURCE_ON_ERROR'] = '1'
 

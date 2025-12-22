@@ -64,69 +64,6 @@ void update_kernel(
 
 update_kernel = cp.RawKernel(kernel_src, 'update_kernel')
 
-plastic_src = r'''
-extern "C" __global__
-void plastic_update(
-    float* __restrict__ U,
-    float* __restrict__ V,
-    const float* __restrict__ R,
-    const float* __restrict__ dR,
-    const int*   __restrict__ children_flat,  // length N * child_count
-    int N,
-    int child_count,
-    int k,
-    float A_p,
-    float A_m,
-    float tau_p,
-    float tau_m,
-    float reg,
-    float lr
-){
-    int e = blockDim.x * blockIdx.x + threadIdx.x;
-    int E = N * child_count;
-    if (e >= E) return;
-
-    int p  = e / child_count;   // parent neuron index (0..N-1)
-    int cc = e % child_count;
-    int c  = children_flat[e];  // child neuron index
-
-    const float Rp  = R[p];
-    const float dRp = dR[p];
-    const float Rc  = R[c];
-    const float dRc = dR[c];
-
-    // Pointers to U[p,:] and V[c,:]
-    float* u = U + (size_t)p * k;
-    float* v = V + (size_t)c * k;
-
-    // Compute effective weight w = u·v
-    float w = 0.0f;
-    for (int kk = 0; kk < k; ++kk) {
-        w += u[kk] * v[kk];
-    }
-
-    // STDP-like delta_ij; mirrors your Python formula, simplified
-    float delta = A_p * Rp * (Rc + tau_p * dRc)
-                - A_m * Rc * (Rp - tau_m * dRp)
-                - reg * w * w * w;
-
-    // Gradient-like update: dU ~ delta * V, dV ~ delta * U
-    for (int kk = 0; kk < k; ++kk) {
-        float u_val = u[kk];
-        float v_val = v[kk];
-
-        float dU = lr * delta * v_val;
-        float dV = lr * delta * u_val;
-
-        atomicAdd(&u[kk], dU);
-        atomicAdd(&v[kk], dV);
-    }
-}
-''';
-
-plastic_update_kernel = cp.RawKernel(plastic_src, "plastic_update");
-
-
 @dataclass
 class WeightMatrixCUDA:
     _NO_STORE = object()
@@ -137,7 +74,9 @@ class WeightMatrixCUDA:
         rank: int = None, 
         check_indexing: bool = True, 
         weight_initializer:callable = cp.random.normal, 
-        save_network=True):
+        save_network=True,
+        use_bloomier=True
+    ):
         
         children_counts = {len(c) for c in network.values()}
         if len(children_counts) == 0:
@@ -153,8 +92,10 @@ class WeightMatrixCUDA:
         k = rank
         U,V = weight_initializer(size=(2, n, k)).astype(cp.float32)
 
-        self.bloomier = BloomierFilterCUDA()
-        self.bloomier.construct(*children_counts, network)
+        self.use_bloomier = use_bloomier
+        if use_bloomier:
+            self.bloomier = BloomierFilterCUDA()
+            self.bloomier.construct(*children_counts, network)
 
         if save_network:
             self.network = network
@@ -165,7 +106,9 @@ class WeightMatrixCUDA:
         self.size = n
 
     def get_neighbors(self, i):
-        return self.bloomier.get_neighbors(i)
+        if self.use_bloomier:
+            return self.bloomier.get_neighbors(i)
+
 
     @dataclass
     class _At:
@@ -268,54 +211,6 @@ class WeightMatrixCUDA:
                  If, Jf, Df, inv_i, inv_j,
                  k, cp.float32(lr), cp.float32(l2_reg))
             )        
-
-    def plastic_step(self,
-                     children_flat,
-                     R,
-                     dR,
-                     A_p=5e-3,
-                     A_m=1e-3,
-                     tau_p=0.5,
-                     tau_m=0.25,
-                     reg=1e-2,
-                     lr=0.5):
-        """
-        GPU plasticity update: modifies self.U and self.V in-place
-        using low-rank W = U V^T and a per-edge delta(R,dR).
-        """
-        N = self.size
-        k = self.U.shape[1]
-        child_count = children_flat.size // N
-
-        # Ensure dtypes
-        U = self.U.astype(cp.float32, copy=False)
-        V = self.V.astype(cp.float32, copy=False)
-        R = R.astype(cp.float32, copy=False)
-        dR = dR.astype(cp.float32, copy=False)
-        children_flat = children_flat.astype(cp.int32, copy=False)
-
-        E = N * child_count
-        threads = 256
-        blocks = (E + threads - 1) // threads
-
-        plastic_update_kernel(
-            (blocks,), (threads,),
-            (
-                U, V,
-                R, dR,
-                children_flat,
-                N,
-                child_count,
-                k,
-                cp.float32(A_p),
-                cp.float32(A_m),
-                cp.float32(tau_p),
-                cp.float32(tau_m),
-                cp.float32(reg),
-                cp.float32(lr),
-            )
-        )
-
 
     def save(self, filepath):
         cp.savez_compressed(filepath, u=self.U, v=self.V)

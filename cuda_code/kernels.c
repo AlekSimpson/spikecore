@@ -35,7 +35,7 @@ void update_weight_matrix(
         den_v += v_anchor[d] * v_anchor[d];
         den_u += u_anchor[d] * u_anchor[d];
     }
-    
+
     for (int d = 0; d < k; d++) {
         float du = lr * (delta * (v_anchor[d] / den_v) - l2_reg * (u_anchor[d] - u_anchor[d]));
         float dv = lr * (delta * (u_anchor[d] / den_u) - l2_reg * (v_anchor[d] - v_anchor[d]));
