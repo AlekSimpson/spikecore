@@ -87,9 +87,11 @@ class SpikeEngineCUDA:
 
         self._setup_lifetime(lifetime)
         tick = 0
-        if len(self.input_neurons) == 0:
+        input_neurons = getattr(self, "input_neurons", None)
+        if input_neurons is None or len(input_neurons) == 0:
             print("Set input neurons before starting the simulation.")
             return
+        input_spikes = cp.asarray(input_spikes, dtype=cp.float32)
         self.recording = True
         with tqdm(total=self.lifetime) as progress:
             with open(filename, "wb") as f:
@@ -107,7 +109,7 @@ class SpikeEngineCUDA:
         kernel(
             (self.blocks, ), (self.threads, ),
             (
-                tick,
+                cp.int32(tick),
                 self.SPIKE_PERIOD,
                 self.SPIKE_THRESHOLD,
                 self.LEARNING_RATE,
@@ -116,13 +118,12 @@ class SpikeEngineCUDA:
                 self.weights.U,
                 self.weights.V,
                 self.weights.neighbors,
-                self.neuron_count,
+                cp.int32(self.neuron_count),
                 self.inputs,
                 self.membrane_potentials,
                 self.last_spiked
             )
         )
-
 
 
 
