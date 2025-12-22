@@ -116,7 +116,13 @@ class SpikeEngineCUDA:
             return
         self.input_neurons = cp.asarray(input_list, dtype=cp.int32)
 
-    def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
+    def start_static_record(
+        self,
+        input_spikes: cp.ndarray,
+        lifetime: int,
+        filename: str,
+        record_membrane: bool = True,
+    ):
         if self.step_kernel is None:
             self._compile_kernels()
         self._setup_lifetime(lifetime)
@@ -135,6 +141,8 @@ class SpikeEngineCUDA:
                     self.next_count.fill(0)
                     self._add_active(self.input_neurons, tick)
                     self.step(tick)
+                    if record_membrane:
+                        f.write(self.membrane_potentials.get().tobytes())
                     self.active, self.next_active = self.next_active, self.active
                     self.active_count, self.next_count = self.next_count, self.active_count
                     # f.write(self.membrane_potentials.get().tobytes())
@@ -176,7 +184,6 @@ class SpikeEngineCUDA:
                 self.active_gen,
             )
         )
-
 
 
 
