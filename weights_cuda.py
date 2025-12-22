@@ -5,6 +5,8 @@ import time
 
 from k2tree import K2Tree
 
+DEFAULT_RANK = 64
+
 kernel_src = r'''
 extern "C" __global__
 void update_kernel(
@@ -90,7 +92,7 @@ class WeightMatrixCUDA:
         n = len(network.keys())
 
         if rank is None:
-            rank = math.ceil(0.05 * n)
+            rank = min(DEFAULT_RANK, n)
 
         k = rank
         U,V = weight_initializer(size=(2, n, k)).astype(cp.float32)
@@ -237,5 +239,3 @@ class WeightMatrixCUDA:
             self.V = data['v']
         except:
             raise Exception(f"Couldn't open file: {filepath}")
-
-

@@ -7,6 +7,15 @@ typedef int int32_t;
 typedef unsigned short uint16_t;
 typedef unsigned char uint8_t;
 
+__device__ __forceinline__
+float apply_decay(float mp, float resting, float decay_rate, int dt) {
+    if (dt <= 0) {
+        return mp;
+    }
+    float decay = powf(1.0f - decay_rate, (float)dt);
+    return resting + (mp - resting) * decay;
+}
+
 
 __device__
 void update_weight_matrix(
@@ -45,8 +54,29 @@ void update_weight_matrix(
 }
 
 extern "C" __global__
+void add_active_kernel(
+    const int* __restrict__ indices,
+    int n_indices,
+    int tick,
+    int* __restrict__ active,
+    int* __restrict__ active_count,
+    int* __restrict__ active_gen
+) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx >= n_indices) return;
+
+    int neuron = indices[idx];
+    int prev = atomicExch(&active_gen[neuron], tick);
+    if (prev != tick) {
+        int pos = atomicAdd(active_count, 1);
+        active[pos] = neuron;
+    }
+}
+
+extern "C" __global__
 void step_kernel(
     int tick,
+    int next_tick,
     const int SPIKE_PERIOD,
     const float SPIKE_THRESHOLD,
     const float LEARNING_RATE,
@@ -58,23 +88,38 @@ void step_kernel(
     int neuron_count,
     float* __restrict__ inputs,
     float* __restrict__ membrane_potentials,
-    int* __restrict__ last_spiked
+    int* __restrict__ last_spiked,
+    int* __restrict__ last_updated,
+    const int* __restrict__ active,
+    const int* __restrict__ active_count,
+    int* __restrict__ next_active,
+    int* __restrict__ next_count,
+    int* __restrict__ active_gen
 ) {
-    int neuron_thread_id = blockDim.x * blockIdx.x + threadIdx.x;
-    if (neuron_thread_id >= neuron_count) return; // one thread per neuron
+    int thread_id = blockDim.x * blockIdx.x + threadIdx.x;
+    int count = active_count[0];
+    if (thread_id >= count) return;
+
+    int neuron_thread_id = active[thread_id];
+    if (neuron_thread_id < 0 || neuron_thread_id >= neuron_count) return;
 
     // todo: would updating the input neuron updates in the kernel be faster?
 
-    membrane_potentials[neuron_thread_id] = membrane_potentials[neuron_thread_id] + inputs[neuron_thread_id];
+    int last_upd = last_updated[neuron_thread_id];
+    int dt = tick - last_upd;
+    float mp = membrane_potentials[neuron_thread_id];
+    mp = apply_decay(mp, RESTING_MP, DECAY_RATE, dt);
+    mp = mp + inputs[neuron_thread_id];
     inputs[neuron_thread_id] = 0;
 
     int time_last_spiked = last_spiked[neuron_thread_id];
     if ((tick - time_last_spiked) == SPIKE_PERIOD) {
         membrane_potentials[neuron_thread_id] = RESTING_MP;
+        last_updated[neuron_thread_id] = tick;
         return;
     }
 
-    if (membrane_potentials[neuron_thread_id] > SPIKE_THRESHOLD) {
+    if (mp > SPIKE_THRESHOLD) {
         // spike
         if ((tick - time_last_spiked) > SPIKE_PERIOD) {
             last_spiked[neuron_thread_id] = tick;
@@ -106,15 +151,27 @@ void step_kernel(
 		dot += u[i] * v[i];
 	    }
 	    atomicAdd(&inputs[child], dot);
+
+            int prev = atomicExch(&active_gen[child], next_tick);
+            if (prev != next_tick) {
+                int pos = atomicAdd(next_count, 1);
+                next_active[pos] = child;
+            }
         }
+        int prev = atomicExch(&active_gen[neuron_thread_id], next_tick);
+        if (prev != next_tick) {
+            int pos = atomicAdd(next_count, 1);
+            next_active[pos] = neuron_thread_id;
+        }
+        membrane_potentials[neuron_thread_id] = mp;
+        last_updated[neuron_thread_id] = tick;
         return;
     }
 
     // otherwise decay and end
-    float neuron_mp = membrane_potentials[neuron_thread_id];
-    membrane_potentials[neuron_thread_id] = neuron_mp + (RESTING_MP - neuron_mp) * DECAY_RATE;
+    membrane_potentials[neuron_thread_id] = mp;
+    last_updated[neuron_thread_id] = tick;
 }
-
 
 
 

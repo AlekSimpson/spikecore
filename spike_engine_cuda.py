@@ -61,6 +61,14 @@ class SpikeEngineCUDA:
 
         self.mp_logs = cp.zeros((self.neuron_count, 0), dtype=cp.float32)
         self.last_spiked = cp.zeros((self.neuron_count, ), dtype=cp.int32)
+        self.last_updated = cp.zeros((self.neuron_count, ), dtype=cp.int32)
+        self.active = cp.empty((self.neuron_count, ), dtype=cp.int32)
+        self.next_active = cp.empty((self.neuron_count, ), dtype=cp.int32)
+        self.active_count = cp.zeros((1,), dtype=cp.int32)
+        self.next_count = cp.zeros((1,), dtype=cp.int32)
+        self.active_gen = cp.full((self.neuron_count, ), -1, dtype=cp.int32)
+        self.step_kernel = None
+        self.add_active_kernel = None
 
         self.alive = True
 
@@ -74,17 +82,43 @@ class SpikeEngineCUDA:
 
         self.mp_logs = cp.zeros((self.neuron_count, self.lifetime), dtype=cp.float32)
 
-    def set_input_neurons(self, input_list: list): 
-        if input_list == None:
-            return
-        self.input_neurons = cp.array(input_list)
-
-    def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
+    def _compile_kernels(self):
         step_src = open("cuda_code/kernels.c", "r").read();
         step_src = step_src.replace("<<NEIGHB_COUNT_SUB>>", str(self.weights.neighb_count))
         step_src = step_src.replace("<<K_SUB>>", str(self.weights.U.shape[1]))
-        step_kernel = cp.RawKernel(step_src, "step_kernel")
+        self.step_kernel = cp.RawKernel(step_src, "step_kernel")
+        self.add_active_kernel = cp.RawKernel(step_src, "add_active_kernel")
 
+    def _add_active(self, indices: cp.ndarray, tick: int):
+        if indices is None or indices.size == 0:
+            return
+        if self.add_active_kernel is None:
+            self._compile_kernels()
+        idx = cp.asarray(indices, dtype=cp.int32).ravel()
+        threads = 256
+        blocks = (idx.size + threads - 1) // threads
+        if blocks == 0:
+            return
+        self.add_active_kernel(
+            (blocks,), (threads,),
+            (
+                idx,
+                cp.int32(idx.size),
+                cp.int32(tick),
+                self.active,
+                self.active_count,
+                self.active_gen,
+            ),
+        )
+
+    def set_input_neurons(self, input_list: list): 
+        if input_list == None:
+            return
+        self.input_neurons = cp.asarray(input_list, dtype=cp.int32)
+
+    def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
+        if self.step_kernel is None:
+            self._compile_kernels()
         self._setup_lifetime(lifetime)
         tick = 0
         input_neurons = getattr(self, "input_neurons", None)
@@ -98,18 +132,30 @@ class SpikeEngineCUDA:
                 f.write(self.neuron_count.to_bytes(4, "big"))
                 while tick < self.lifetime:
                     self.inputs[self.input_neurons] += input_spikes[tick]
-                    self.step(tick, kernel=step_kernel)
+                    self.next_count.fill(0)
+                    self._add_active(self.input_neurons, tick)
+                    self.step(tick)
+                    self.active, self.next_active = self.next_active, self.active
+                    self.active_count, self.next_count = self.next_count, self.active_count
                     # f.write(self.membrane_potentials.get().tobytes())
                     tick += 1
                     progress.update(1)
         self.recording = False
         print(f"Recording saved: {filename}")
 
-    def step(self, tick, kernel):
-        kernel(
-            (self.blocks, ), (self.threads, ),
+    def step(self, tick: int):
+        if self.step_kernel is None:
+            self._compile_kernels()
+        active_count = int(self.active_count.get())
+        if active_count == 0:
+            return
+        threads = 256
+        blocks = (active_count + threads - 1) // threads
+        self.step_kernel(
+            (blocks, ), (threads, ),
             (
                 cp.int32(tick),
+                cp.int32(tick + 1),
                 self.SPIKE_PERIOD,
                 self.SPIKE_THRESHOLD,
                 self.LEARNING_RATE,
@@ -121,10 +167,15 @@ class SpikeEngineCUDA:
                 cp.int32(self.neuron_count),
                 self.inputs,
                 self.membrane_potentials,
-                self.last_spiked
+                self.last_spiked,
+                self.last_updated,
+                self.active,
+                self.active_count,
+                self.next_active,
+                self.next_count,
+                self.active_gen,
             )
         )
-
 
 
 
