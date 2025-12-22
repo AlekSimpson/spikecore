@@ -1,8 +1,9 @@
 import cupy as cp
 from dataclasses import dataclass
-from bloomier_filter_cuda import BloomierFilterCUDA
 import math
 import time
+
+from k2tree import K2Tree
 
 kernel_src = r'''
 extern "C" __global__
@@ -75,7 +76,9 @@ class WeightMatrixCUDA:
         check_indexing: bool = True, 
         weight_initializer:callable = cp.random.normal, 
         save_network=True,
-        use_bloomier=True
+        use_k2tree=True,
+        verify_k2tree: bool = False,
+        verify_progress_every: int | None = 1000,
     ):
         
         children_counts = {len(c) for c in network.values()}
@@ -92,10 +95,20 @@ class WeightMatrixCUDA:
         k = rank
         U,V = weight_initializer(size=(2, n, k)).astype(cp.float32)
 
-        self.use_bloomier = use_bloomier
-        if use_bloomier:
-            self.bloomier = BloomierFilterCUDA()
-            self.bloomier.construct(*children_counts, network)
+        self.neighb_count = int(next(iter(children_counts)))
+        self.neighbors = cp.asarray(
+            [network[i] for i in range(n)],
+            dtype=cp.int32,
+        )
+        self.k2tree = None
+        if use_k2tree:
+            self.k2tree = K2Tree.from_adjdict(
+                network,
+                N=n,
+                use_gpu=True,
+                verify_all=verify_k2tree,
+                verify_progress_every=verify_progress_every,
+            )
 
         if save_network:
             self.network = network
@@ -106,8 +119,9 @@ class WeightMatrixCUDA:
         self.size = n
 
     def get_neighbors(self, i):
-        if self.use_bloomier:
-            return self.bloomier.get_neighbors(i)
+        nodes = cp.atleast_1d(cp.asarray(i, dtype=cp.int32))
+        out = self.neighbors[nodes]
+        return out if out.shape[0] > 1 else out.reshape(-1)
 
 
     @dataclass
@@ -158,7 +172,8 @@ class WeightMatrixCUDA:
         def __iter__(self):
             if self.key is None:
                 raise TypeError("The .children interface must be indexed.")
-            yield from self.owner.bloomier.child_iter(self.key)
+            for child in self.owner.neighbors[int(self.key)].get().tolist():
+                yield int(child)
     @property
     def children(self):
         return WeightMatrixCUDA._Children(self)
@@ -222,6 +237,5 @@ class WeightMatrixCUDA:
             self.V = data['v']
         except:
             raise Exception(f"Couldn't open file: {filepath}")
-
 
 

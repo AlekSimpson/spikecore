@@ -31,7 +31,11 @@ class SpikeEngineCUDA:
         weight_initializer: callable = cp.random.normal, 
         resting_mp=0.1,
         decay_rate=0.01,
-        learning_rate=0.00222):
+        learning_rate=0.00222,
+        use_k2tree: bool = True,
+        verify_k2tree: bool = False,
+        verify_progress_every: int | None = 1000,
+    ):
 
         self.RESTING_MP = cp.float32(resting_mp)
         self.DECAY_RATE = cp.float32(decay_rate)
@@ -42,7 +46,14 @@ class SpikeEngineCUDA:
         self.shape = shape
         self.neuron_count = self.shape[0] * self.shape[1]
         print("Constructing weight matrix...")
-        self.weights = WeightMatrixCUDA(network, rank, weight_initializer)
+        self.weights = WeightMatrixCUDA(
+            network,
+            rank=rank,
+            weight_initializer=weight_initializer,
+            use_k2tree=use_k2tree,
+            verify_k2tree=verify_k2tree,
+            verify_progress_every=verify_progress_every,
+        )
         print("Weights constructed.")
         self.inputs = cp.zeros((self.neuron_count, ), dtype=cp.float32)
         self.membrane_potentials = cp.empty((self.neuron_count, ), dtype=cp.float32)
@@ -70,7 +81,7 @@ class SpikeEngineCUDA:
 
     def start_static_record(self, input_spikes: cp.ndarray, lifetime: int, filename: str):
         step_src = open("cuda_code/kernels.c", "r").read();
-        step_src = step_src.replace("<<NEIGHB_COUNT_SUB>>", str(self.weights.bloomier.neighb_count))
+        step_src = step_src.replace("<<NEIGHB_COUNT_SUB>>", str(self.weights.neighb_count))
         step_src = step_src.replace("<<K_SUB>>", str(self.weights.U.shape[1]))
         step_kernel = cp.RawKernel(step_src, "step_kernel")
 
@@ -102,21 +113,15 @@ class SpikeEngineCUDA:
                 self.LEARNING_RATE,
                 self.DECAY_RATE,
                 self.RESTING_MP,
-                self.weights.bloomier.salt,
-                cp.uint64(0xFFFFFFFFFFFFFFFF),
-                self.weights.bloomier.key_amount,
                 self.weights.U,
                 self.weights.V,
-                self.weights.bloomier.table,
+                self.weights.neighbors,
                 self.neuron_count,
                 self.inputs,
                 self.membrane_potentials,
                 self.last_spiked
             )
         )
-
-
-
 
 
 
