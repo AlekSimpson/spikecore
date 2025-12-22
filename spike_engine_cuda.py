@@ -62,7 +62,7 @@ class SpikeEngineCUDA:
 
         self.alive = True
 
-        self.threads = 256
+        self.threads = 1024
         self.blocks = (self.neuron_count + self.threads - 1) // self.threads
 
     def _setup_lifetime(self, lifetime: int):
