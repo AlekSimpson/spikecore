@@ -12,6 +12,9 @@ float apply_decay(float mp, float resting, float decay_rate, int dt) {
     if (dt <= 0) {
         return mp;
     }
+    if (dt == 1) {
+        return resting + (mp - resting) * (1.0f - decay_rate);
+    }
     float decay = powf(1.0f - decay_rate, (float)dt);
     return resting + (mp - resting) * decay;
 }
@@ -85,7 +88,8 @@ void decay_kernel(
     int neuron_thread_id = blockDim.x * blockIdx.x + threadIdx.x;
     if (neuron_thread_id >= neuron_count) return;
     float mp = membrane_potentials[neuron_thread_id];
-    mp = RESTING_MP + (mp - RESTING_MP) * (1.0f - DECAY_RATE);
+    int dt = tick - last_updated[neuron_thread_id];
+    mp = apply_decay(mp, RESTING_MP, DECAY_RATE, dt);
     membrane_potentials[neuron_thread_id] = mp;
     last_updated[neuron_thread_id] = tick;
 }
@@ -148,32 +152,32 @@ void step_kernel(
         const int neighbor_base = neuron_thread_id * NEIGHB_COUNT;
         for (int c = 0; c < NEIGHB_COUNT; ++c) {
             int child = neighbors[neighbor_base + c];
-	    // printf("child %d is: %d\n", c, child);
+            // printf("child %d is: %d\n", c, child);
 
-            if (!(last_spiked[child] == 0 || last_spiked[child] == tick)) {
+            if (LEARNING_RATE != 0.0f && !(last_spiked[child] == 0 || last_spiked[child] == tick)) {
                 float tick_delta = (float)(tick - last_spiked[child]);
                 float decay_delta = -LEARNING_RATE * powf(tick_delta, -3);
-		update_weight_matrix(
-		    U, V,
-		    neuron_thread_id, 
-		    child,
-		    decay_delta,
-		    0.5, 
-		    1
-		);
+                update_weight_matrix(
+                    U, V,
+                    neuron_thread_id,
+                    child,
+                    decay_delta,
+                    0.5,
+                    1
+                );
             }
 
             float weight = CONSTANT_WEIGHT;
             if (!USE_CONSTANT_WEIGHT) {
                 const float* u = U + (size_t)neuron_thread_id * k;
-	        const float* v = V + (size_t)child * k;
-	        float dot = 0.0f;
-	        for (int i = 0; i < k; ++i) {
-		    dot += u[i] * v[i];
-	        }
+                const float* v = V + (size_t)child * k;
+                float dot = 0.0f;
+                for (int i = 0; i < k; ++i) {
+                    dot += u[i] * v[i];
+                }
                 weight = dot;
             }
-	    atomicAdd(&inputs[child], weight);
+            atomicAdd(&inputs[child], weight);
 
             int prev = atomicExch(&active_gen[child], next_tick);
             if (prev != next_tick) {
@@ -195,9 +199,6 @@ void step_kernel(
     membrane_potentials[neuron_thread_id] = mp;
     last_updated[neuron_thread_id] = tick;
 }
-
-
-
 
 
 
