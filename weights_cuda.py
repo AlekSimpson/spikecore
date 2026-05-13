@@ -138,8 +138,42 @@ class WeightMatrixCUDA:
         self.U.fill(u_val)
         self.V.fill(v_val)
         self.constant_weight = cp.float32(val)
+        self.use_constant_weight = True
 
+    def neighbor_weights(self):
+        rows = cp.repeat(cp.arange(self.size, dtype=cp.int32), self.neighb_count)
+        cols = self.neighbors.reshape(-1)
+        return cp.einsum("ij,ij->i", self.U[rows], self.V[cols])
 
+    def neighbor_weight_stats(self):
+        weights = self.neighbor_weights()
+        return {
+            "mean": float(weights.mean().get()),
+            "std": float(weights.std().get()),
+            "rms": float(cp.sqrt(cp.mean(weights * weights)).get()),
+            "min": float(weights.min().get()),
+            "max": float(weights.max().get()),
+        }
+
+    def scale_neighbor_weights_to_rms(self, target_rms: float, eps: float = 1e-12):
+        target = float(target_rms)
+        if target < 0:
+            raise ValueError("target_rms must be non-negative.")
+
+        stats_before = self.neighbor_weight_stats()
+        current = max(stats_before["rms"], eps)
+        factor = math.sqrt(target / current) if target > 0 else 0.0
+        self.U *= cp.float32(factor)
+        self.V *= cp.float32(factor)
+        self.constant_weight = None
+        self.use_constant_weight = False
+        stats_after = self.neighbor_weight_stats()
+        return {
+            "target_rms": target,
+            "scale_factor": factor,
+            "before": stats_before,
+            "after": stats_after,
+        }
 
     @dataclass
     class _At:
