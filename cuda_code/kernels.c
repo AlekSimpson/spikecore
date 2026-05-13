@@ -95,6 +95,43 @@ void decay_kernel(
 }
 
 extern "C" __global__
+void reservoir_feature_kernel(
+    int neuron_count,
+    int tick,
+    float spike_tau,
+    float voltage_scale,
+    float* __restrict__ membrane_potentials,
+    int* __restrict__ last_spiked,
+    int* __restrict__ last_updated,
+    const float RESTING_MP,
+    const float DECAY_RATE,
+    float* __restrict__ features
+) {
+    int neuron_thread_id = blockDim.x * blockIdx.x + threadIdx.x;
+    if (neuron_thread_id >= neuron_count) return;
+
+    float mp = membrane_potentials[neuron_thread_id];
+    int dt = tick - last_updated[neuron_thread_id];
+    mp = apply_decay(mp, RESTING_MP, DECAY_RATE, dt);
+    membrane_potentials[neuron_thread_id] = mp;
+    last_updated[neuron_thread_id] = tick;
+
+    int last = last_spiked[neuron_thread_id];
+    float trace = 0.0f;
+    if (last > 0) {
+        int age = tick - last;
+        if (age < 0) age = 0;
+        trace = expf(-(float)age / spike_tau);
+    }
+    features[neuron_thread_id] = trace;
+    features[neuron_count + neuron_thread_id] = (mp - RESTING_MP) / voltage_scale;
+
+    if (neuron_thread_id == 0) {
+        features[2 * neuron_count] = 1.0f;
+    }
+}
+
+extern "C" __global__
 void step_kernel(
     int tick,
     int next_tick,
@@ -199,7 +236,6 @@ void step_kernel(
     membrane_potentials[neuron_thread_id] = mp;
     last_updated[neuron_thread_id] = tick;
 }
-
 
 
 

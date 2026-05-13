@@ -12,6 +12,17 @@ import threading
 os.environ['CUPY_DUMP_CUDA_SOURCE_ON_ERROR'] = '1'
 
 
+DEFAULT_MAX_LOG_BYTES = 512 * 1024 * 1024
+
+
+def _format_bytes(byte_count: int) -> str:
+    value = float(byte_count)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
 class _AsyncWriter:
     def __init__(self, handle, max_chunks: int = 8):
         self._handle = handle
@@ -117,6 +128,7 @@ class SpikeEngineCUDA:
         self.step_kernel = None
         self.add_active_kernel = None
         self.decay_kernel = None
+        self.reservoir_feature_kernel = None
         self.use_constant_weight = False
 
         self.alive = True
@@ -124,10 +136,27 @@ class SpikeEngineCUDA:
         self.threads = 256
         self.blocks = (self.neuron_count + self.threads - 1) // self.threads
 
-    def _setup_lifetime(self, lifetime: int):
-        self.lifetime = lifetime
-        if lifetime < 0:
+    def _setup_lifetime(
+        self,
+        lifetime: int,
+        *,
+        allocate_logs: bool = False,
+        max_log_bytes: int | None = DEFAULT_MAX_LOG_BYTES,
+    ):
+        self.lifetime = int(lifetime)
+        if self.lifetime < 0 or not allocate_logs:
+            self.mp_logs = cp.zeros((self.neuron_count, 0), dtype=cp.float32)
             return
+
+        required_bytes = self.neuron_count * self.lifetime * cp.dtype(cp.float32).itemsize
+        if max_log_bytes is not None and required_bytes > max_log_bytes:
+            raise MemoryError(
+                "Refusing to allocate membrane log "
+                f"({self.neuron_count} neurons x {self.lifetime} ticks, "
+                f"{_format_bytes(required_bytes)}). Static recording streams "
+                "to disk; only allocate mp_logs when explicitly needed with a "
+                "larger max_log_bytes budget."
+            )
 
         self.mp_logs = cp.zeros((self.neuron_count, self.lifetime), dtype=cp.float32)
 
@@ -138,6 +167,7 @@ class SpikeEngineCUDA:
         self.step_kernel = cp.RawKernel(step_src, "step_kernel")
         self.add_active_kernel = cp.RawKernel(step_src, "add_active_kernel")
         self.decay_kernel = cp.RawKernel(step_src, "decay_kernel")
+        self.reservoir_feature_kernel = cp.RawKernel(step_src, "reservoir_feature_kernel")
 
     def _add_active(self, indices: cp.ndarray, tick: int):
         if indices is None or indices.size == 0:
@@ -178,10 +208,78 @@ class SpikeEngineCUDA:
             ),
         )
 
+    def reservoir_features_device(
+        self,
+        tick: int,
+        spike_tau: float,
+        voltage_scale: float,
+        out: cp.ndarray | None = None,
+    ) -> cp.ndarray:
+        if self.reservoir_feature_kernel is None:
+            self._compile_kernels()
+        if spike_tau <= 0:
+            raise ValueError("spike_tau must be positive.")
+        if voltage_scale <= 0:
+            raise ValueError("voltage_scale must be positive.")
+        feature_count = 2 * self.neuron_count + 1
+        if out is None:
+            out = cp.empty((feature_count,), dtype=cp.float32)
+        elif out.shape != (feature_count,):
+            raise ValueError(f"out must have shape {(feature_count,)}, got {out.shape}.")
+        self.reservoir_feature_kernel(
+            (self.blocks,), (self.threads,),
+            (
+                cp.int32(self.neuron_count),
+                cp.int32(tick),
+                cp.float32(spike_tau),
+                cp.float32(voltage_scale),
+                self.membrane_potentials,
+                self.last_spiked,
+                self.last_updated,
+                self.RESTING_MP,
+                self.DECAY_RATE,
+                out,
+            ),
+        )
+        return out
+
     def set_input_neurons(self, input_list: list): 
-        if input_list == None:
+        if input_list is None:
             return
         self.input_neurons = cp.asarray(input_list, dtype=cp.int32)
+
+    def reset_state(self, last_spiked_value: int = 0, active_gen_value: int = -1):
+        self.inputs.fill(0)
+        self.membrane_potentials.fill(self.RESTING_MP)
+        self.last_spiked.fill(cp.int32(last_spiked_value))
+        self.last_updated.fill(0)
+        self.active_count.fill(0)
+        self.next_count.fill(0)
+        self.active_gen.fill(cp.int32(active_gen_value))
+
+    def advance_static_input(
+        self,
+        input_values,
+        tick: int,
+        input_neurons=None,
+        full_decay: bool = False,
+    ):
+        if self.step_kernel is None:
+            self._compile_kernels()
+        if input_neurons is None:
+            input_neurons = getattr(self, "input_neurons", None)
+        if input_neurons is None or len(input_neurons) == 0:
+            raise ValueError("Set input neurons before advancing the simulation.")
+        if not isinstance(input_neurons, cp.ndarray):
+            input_neurons = cp.asarray(input_neurons, dtype=cp.int32)
+        if full_decay:
+            self._decay_all(tick)
+        self.inputs[input_neurons] += cp.asarray(input_values, dtype=cp.float32)
+        self.next_count.fill(0)
+        self._add_active(input_neurons, tick)
+        self.step(tick)
+        self.active, self.next_active = self.next_active, self.active
+        self.active_count, self.next_count = self.next_count, self.active_count
 
     def start_static_record(
         self,
@@ -197,59 +295,81 @@ class SpikeEngineCUDA:
         compression_queue_max: int = 8,
         compression_chunk_bytes: int = 4 * 1024 * 1024,
     ):
-        if self.step_kernel is None:
-            self._compile_kernels()
-        self._setup_lifetime(lifetime)
+        if lifetime < 0:
+            raise ValueError("lifetime must be >= 0 for static recording.")
         if record_stride < 1:
             raise ValueError("record_stride must be >= 1.")
+        if compression_queue_max < 1:
+            raise ValueError("compression_queue_max must be >= 1.")
+        if compression_chunk_bytes < 1:
+            raise ValueError("compression_chunk_bytes must be >= 1.")
         tick = 0
         input_neurons = getattr(self, "input_neurons", None)
         if input_neurons is None or len(input_neurons) == 0:
             print("Set input neurons before starting the simulation.")
             return
-        input_spikes = cp.asarray(input_spikes, dtype=cp.float32)
+        if self.step_kernel is None:
+            self._compile_kernels()
+        self._setup_lifetime(lifetime, allocate_logs=False)
+        input_spikes_on_device = isinstance(input_spikes, cp.ndarray)
+        float32_dtype = cp.dtype(cp.float32)
         self.recording = True
         comp, out_path = self._resolve_record_compression(filename, compression)
         writer = None
         buffer = None
-        with tqdm(total=self.lifetime) as progress:
-            f = self._open_record_file(out_path, comp, compression_level)
-            if compression_async and comp is not None:
-                writer = _AsyncWriter(f, max_chunks=compression_queue_max)
-                buffer = bytearray()
-                buffer.extend(self.neuron_count.to_bytes(4, "big"))
-            else:
-                f.write(self.neuron_count.to_bytes(4, "big"))
+        f = None
+        try:
+            with tqdm(total=self.lifetime) as progress:
+                f = self._open_record_file(out_path, comp, compression_level)
+                if compression_async and comp is not None:
+                    writer = _AsyncWriter(f, max_chunks=compression_queue_max)
+                    buffer = bytearray()
+                    buffer.extend(self.neuron_count.to_bytes(4, "big"))
+                else:
+                    f.write(self.neuron_count.to_bytes(4, "big"))
 
-            while tick < self.lifetime:
-                if full_decay:
-                    self._decay_all(tick)
-                self.inputs[self.input_neurons] += input_spikes[tick]
-                self.next_count.fill(0)
-                self._add_active(self.input_neurons, tick)
-                self.step(tick)
-                if record_membrane and (tick % record_stride == 0):
-                    data = self.membrane_potentials.get().tobytes()
-                    if writer is not None:
-                        buffer.extend(data)
-                        if len(buffer) >= compression_chunk_bytes:
-                            writer.write(bytes(buffer))
-                            buffer.clear()
-                    else:
-                        f.write(data)
-                self.active, self.next_active = self.next_active, self.active
-                self.active_count, self.next_count = self.next_count, self.active_count
-                tick += 1
-                progress.update(1)
+                while tick < self.lifetime:
+                    tick_input = input_spikes[tick]
+                    if (
+                        not input_spikes_on_device
+                        or getattr(tick_input, "dtype", None) != float32_dtype
+                    ):
+                        tick_input = cp.asarray(tick_input, dtype=cp.float32)
+                    self.inputs[self.input_neurons] += tick_input
+                    self.next_count.fill(0)
+                    self._add_active(self.input_neurons, tick)
+                    self.step(tick)
+                    if record_membrane and (tick % record_stride == 0):
+                        if full_decay:
+                            self._decay_all(tick)
+                        data = self.membrane_potentials.get().tobytes()
+                        if writer is not None:
+                            buffer.extend(data)
+                            if len(buffer) >= compression_chunk_bytes:
+                                writer.write(bytes(buffer))
+                                buffer.clear()
+                        else:
+                            f.write(data)
+                    self.active, self.next_active = self.next_active, self.active
+                    self.active_count, self.next_count = self.next_count, self.active_count
+                    tick += 1
+                    progress.update(1)
 
+                cp.cuda.Stream.null.synchronize()
+                if writer is not None:
+                    if buffer:
+                        writer.write(bytes(buffer))
+                        buffer.clear()
+                    writer.close()
+                else:
+                    f.close()
+            print(f"Recording saved: {out_path}")
+        finally:
             if writer is not None:
-                if buffer:
-                    writer.write(bytes(buffer))
                 writer.close()
-            else:
+            elif f is not None and not f.closed:
                 f.close()
-        self.recording = False
-        print(f"Recording saved: {out_path}")
+            self.recording = False
 
     def _resolve_record_compression(self, filename: str, compression: str | None) -> tuple[str | None, str]:
         path = str(filename)
@@ -328,14 +448,30 @@ class SpikeEngineCUDA:
         self.use_constant_weight = bool(use_constant_weight)
         return target, w_accum, w_instant
 
+    def scale_random_weights_near_bifurcation(
+        self,
+        input_period: int = 1,
+        scale: float = 1.2,
+        freeze_learning: bool = False,
+    ) -> dict:
+        w_accum, w_instant = self.estimate_bifurcation_weight(input_period=input_period)
+        target = abs(w_accum * float(scale))
+        stats = self.weights.scale_neighbor_weights_to_rms(target)
+        self.use_constant_weight = False
+        if freeze_learning:
+            self.LEARNING_RATE = cp.float32(0)
+        return {
+            "target_rms": target,
+            "w_accum": w_accum,
+            "w_instant": w_instant,
+            "weight_stats": stats,
+        }
+
     def step(self, tick: int):
         if self.step_kernel is None:
             self._compile_kernels()
-        active_count = int(self.active_count.get())
-        if active_count == 0:
-            return
         threads = 256
-        blocks = (active_count + threads - 1) // threads
+        blocks = self.blocks
         self.step_kernel(
             (blocks, ), (threads, ),
             (
