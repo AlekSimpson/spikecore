@@ -1,4 +1,7 @@
 def square_torus(k: int) -> dict[int, list[int]]:
+    k = int(k)
+    if k < 1:
+        raise ValueError("k must be >= 1.")
     return {
         i: [
             (i//k)*k + (i%k + 1) % k,     # right
@@ -20,8 +23,10 @@ def small_world_torus(k: int, random_fanout: int = 4, seed: int | None = None) -
     """
     import numpy as np
 
-    if random_fanout < 0:
-        raise ValueError("random_fanout must be non-negative.")
+    k = int(k)
+    if k < 1:
+        raise ValueError("k must be >= 1.")
+    random_fanout = max(0, int(random_fanout))
 
     base = square_torus(k)
     n = k * k
@@ -31,7 +36,8 @@ def small_world_torus(k: int, random_fanout: int = 4, seed: int | None = None) -
         children = list(base[i])
         used = set(children)
         used.add(i)
-        while len(children) < 4 + random_fanout:
+        target_count = min(4 + random_fanout, len(children) + max(0, n - len(used)))
+        while len(children) < target_count:
             candidate = int(rng.integers(0, n))
             if candidate in used:
                 continue
@@ -50,18 +56,16 @@ def random_fixed_outdegree(k: int, fanout: int = 8, seed: int | None = None) -> 
     """
     import numpy as np
 
+    k = int(k)
+    if k < 1:
+        raise ValueError("k must be >= 1.")
     n = k * k
-    fanout = int(fanout)
-    if fanout <= 0:
-        raise ValueError("fanout must be positive.")
-    if fanout >= n:
-        raise ValueError("fanout must be smaller than the neuron count.")
+    fanout = max(0, min(int(fanout), n - 1))
 
     rng = np.random.default_rng(seed)
     out = {}
     all_nodes = np.arange(n, dtype=np.int32)
     for i in range(n):
         candidates = all_nodes[all_nodes != i]
-        out[i] = rng.choice(candidates, size=fanout, replace=False).astype(int).tolist()
+        out[i] = rng.choice(candidates, size=fanout, replace=False).astype(int).tolist() if fanout else []
     return out
-
